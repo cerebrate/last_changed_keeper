@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Herstelt na een herstart de echte 'laatst gewijzigd'-tijd van de geselecteerde entiteiten uit de recorder. Werkt rechtstreeks op de entiteit zelf. De huidige selectie omvat {count} entiteiten.",
         "data": {
+          "all_entities": "Alle entiteiten volgen (negeert domeinen/entiteiten/labels/gebieden hieronder)",
           "domains": "Domeinen",
           "entities": "Extra losse entiteiten",
           "labels": "Labels",
@@ -21,6 +22,7 @@
         "title": "Last Changed Keeper opnieuw configureren",
         "description": "Pas de selectie aan. De huidige selectie omvat {count} entiteiten.",
         "data": {
+          "all_entities": "Alle entiteiten volgen (negeert domeinen/entiteiten/labels/gebieden hieronder)",
           "domains": "Domeinen",
           "entities": "Extra losse entiteiten",
           "labels": "Labels",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – selectie wijzigen",
         "description": "De huidige selectie omvat {count} entiteiten.",
         "data": {
+          "all_entities": "Alle entiteiten volgen (negeert domeinen/entiteiten/labels/gebieden hieronder)",
           "domains": "Domeinen",
           "entities": "Extra losse entiteiten",
           "labels": "Labels",

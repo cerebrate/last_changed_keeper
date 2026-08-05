@@ -17,6 +17,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.last_changed_keeper.const import (
+    CONF_ALL_ENTITIES,
     CONF_DOMAINS,
     CONF_ENTITIES,
     DOMAIN,
@@ -27,7 +28,12 @@ from custom_components.last_changed_keeper.const import (
 
 async def _add_entry(hass: HomeAssistant) -> MockConfigEntry:
     entry = MockConfigEntry(
-        domain=DOMAIN, data={CONF_DOMAINS: ["light"], CONF_ENTITIES: []}
+        domain=DOMAIN,
+        data={
+            CONF_ALL_ENTITIES: False,
+            CONF_DOMAINS: ["light"],
+            CONF_ENTITIES: [],
+        },
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)

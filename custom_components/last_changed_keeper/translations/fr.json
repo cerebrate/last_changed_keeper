@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Restaure l'heure réelle de « dernière modification » des entités sélectionnées depuis le recorder après un redémarrage. Agit directement sur l'entité elle-même. La sélection actuelle concerne {count} entités.",
         "data": {
+          "all_entities": "Suivre toutes les entités (ignore les domaines/entités/étiquettes/zones ci-dessous)",
           "domains": "Domaines",
           "entities": "Entités individuelles supplémentaires",
           "labels": "Étiquettes",
@@ -21,6 +22,7 @@
         "title": "Reconfigurer Last Changed Keeper",
         "description": "Ajuster la sélection. La sélection actuelle concerne {count} entités.",
         "data": {
+          "all_entities": "Suivre toutes les entités (ignore les domaines/entités/étiquettes/zones ci-dessous)",
           "domains": "Domaines",
           "entities": "Entités individuelles supplémentaires",
           "labels": "Étiquettes",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – modifier la sélection",
         "description": "La sélection actuelle concerne {count} entités.",
         "data": {
+          "all_entities": "Suivre toutes les entités (ignore les domaines/entités/étiquettes/zones ci-dessous)",
           "domains": "Domaines",
           "entities": "Entités individuelles supplémentaires",
           "labels": "Étiquettes",

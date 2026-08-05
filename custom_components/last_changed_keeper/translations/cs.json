@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Po restartu obnoví skutečný čas 'naposledy změněno' u vybraných entit z rekordéru (recorder). Působí přímo na danou entitu. Aktuální výběr zahrnuje {count} entit.",
         "data": {
+          "all_entities": "Sledovat všechny entity (ignoruje domény/entity/štítky/oblasti níže)",
           "domains": "Domény",
           "entities": "Další jednotlivé entity",
           "labels": "Štítky",
@@ -21,6 +22,7 @@
         "title": "Znovu nakonfigurovat Last Changed Keeper",
         "description": "Upravte výběr. Aktuální výběr zahrnuje {count} entit.",
         "data": {
+          "all_entities": "Sledovat všechny entity (ignoruje domény/entity/štítky/oblasti níže)",
           "domains": "Domény",
           "entities": "Další jednotlivé entity",
           "labels": "Štítky",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – změnit výběr",
         "description": "Aktuální výběr zahrnuje {count} entit.",
         "data": {
+          "all_entities": "Sledovat všechny entity (ignoruje domény/entity/štítky/oblasti níže)",
           "domains": "Domény",
           "entities": "Další jednotlivé entity",
           "labels": "Štítky",

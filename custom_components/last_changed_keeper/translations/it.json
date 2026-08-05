@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Ripristina l'ora reale di «ultima modifica» delle entità selezionate dal recorder dopo un riavvio. Agisce direttamente sull'entità stessa. La selezione attuale comprende {count} entità.",
         "data": {
+          "all_entities": "Tieni traccia di tutte le entità (ignora domini/entità/etichette/aree sottostanti)",
           "domains": "Domini",
           "entities": "Entità singole aggiuntive",
           "labels": "Etichette",
@@ -21,6 +22,7 @@
         "title": "Riconfigura Last Changed Keeper",
         "description": "Modifica la selezione. La selezione attuale comprende {count} entità.",
         "data": {
+          "all_entities": "Tieni traccia di tutte le entità (ignora domini/entità/etichette/aree sottostanti)",
           "domains": "Domini",
           "entities": "Entità singole aggiuntive",
           "labels": "Etichette",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – modifica selezione",
         "description": "La selezione attuale comprende {count} entità.",
         "data": {
+          "all_entities": "Tieni traccia di tutte le entità (ignora domini/entità/etichette/aree sottostanti)",
           "domains": "Domini",
           "entities": "Entità singole aggiuntive",
           "labels": "Etichette",

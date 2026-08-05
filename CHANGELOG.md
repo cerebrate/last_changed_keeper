@@ -2,6 +2,17 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.8.0] — 2026-08-05
+### Added
+- **"Track all entities" toggle.** A new switch at the top of the setup /
+  reconfigure / options form covers every entity in Home Assistant,
+  regardless of domains/entities/labels/areas, and is now **on by default**.
+  Picking specific domains or entities still works exactly as before — just
+  turn the toggle off first. Previously, at least one domain or entity had
+  to be selected or the form rejected the save with "please select at least
+  one domain or one entity", which was needless friction for the common
+  case of just wanting everything covered.
+
 ## [0.7.0] — 2026-07-22
 ### Added
 - **Re-patch on runtime re-registration.** Previously, only a full HA restart

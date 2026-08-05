@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Po ponownym uruchomieniu przywraca rzeczywisty czas «ostatniej zmiany» wybranych encji z rejestratora (recorder). Działa bezpośrednio na samej encji. Bieżący wybór obejmuje {count} encji.",
         "data": {
+          "all_entities": "Śledź wszystkie encje (ignoruje domeny/encje/etykiety/obszary poniżej)",
           "domains": "Domeny",
           "entities": "Dodatkowe pojedyncze encje",
           "labels": "Etykiety",
@@ -21,6 +22,7 @@
         "title": "Skonfiguruj ponownie Last Changed Keeper",
         "description": "Dostosuj wybór. Bieżący wybór obejmuje {count} encji.",
         "data": {
+          "all_entities": "Śledź wszystkie encje (ignoruje domeny/encje/etykiety/obszary poniżej)",
           "domains": "Domeny",
           "entities": "Dodatkowe pojedyncze encje",
           "labels": "Etykiety",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – zmień wybór",
         "description": "Bieżący wybór obejmuje {count} encji.",
         "data": {
+          "all_entities": "Śledź wszystkie encje (ignoruje domeny/encje/etykiety/obszary poniżej)",
           "domains": "Domeny",
           "entities": "Dodatkowe pojedyncze encje",
           "labels": "Etykiety",

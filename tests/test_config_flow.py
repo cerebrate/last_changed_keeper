@@ -16,6 +16,7 @@ from custom_components.last_changed_keeper.config_flow import (
     _is_empty,
 )
 from custom_components.last_changed_keeper.const import (
+    CONF_ALL_ENTITIES,
     CONF_DOMAINS,
     CONF_ENTITIES,
     CONF_EXCLUDE,
@@ -48,6 +49,20 @@ async def test_count_targets_exclude_can_empty_a_domain(hass: HomeAssistant) -> 
 
 async def test_is_empty_true_when_no_selection(hass: HomeAssistant) -> None:
     assert _is_empty(hass, {CONF_DOMAINS: [], CONF_ENTITIES: []}) is True
+
+
+async def test_is_empty_false_when_all_entities_enabled(
+    hass: HomeAssistant,
+) -> None:
+    """The "track all entities" toggle makes an otherwise-empty
+    domains/entities selection valid instead of an error."""
+    assert (
+        _is_empty(
+            hass,
+            {CONF_ALL_ENTITIES: True, CONF_DOMAINS: [], CONF_ENTITIES: []},
+        )
+        is False
+    )
 
 
 async def test_is_empty_false_when_domain_selected(hass: HomeAssistant) -> None:
@@ -94,7 +109,8 @@ async def test_user_flow_empty_selection_reshows_form_with_error(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
     result2 = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_DOMAINS: [], CONF_ENTITIES: []}
+        result["flow_id"],
+        {CONF_ALL_ENTITIES: False, CONF_DOMAINS: [], CONF_ENTITIES: []},
     )
     assert result2["type"] == FlowResultType.FORM
     assert result2["errors"] == {"base": "empty_selection"}
@@ -110,6 +126,7 @@ async def test_user_flow_domain_fully_excluded_shows_error(
     result2 = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {
+            CONF_ALL_ENTITIES: False,
             CONF_DOMAINS: ["light"],
             CONF_ENTITIES: [],
             CONF_EXCLUDE: ["light.kitchen"],
@@ -191,7 +208,8 @@ async def test_options_flow_empty_selection_shows_error(
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result2 = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_DOMAINS: [], CONF_ENTITIES: []}
+        result["flow_id"],
+        {CONF_ALL_ENTITIES: False, CONF_DOMAINS: [], CONF_ENTITIES: []},
     )
     assert result2["type"] == FlowResultType.FORM
     assert result2["errors"] == {"base": "empty_selection"}

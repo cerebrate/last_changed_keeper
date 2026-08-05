@@ -72,6 +72,7 @@ from homeassistant.util.read_only_dict import ReadOnlyDict
 from .const import (
     ATTR_LAST_TRIGGERED,
     BULK_WINDOW_DAYS,
+    CONF_ALL_ENTITIES,
     CONF_AREAS,
     CONF_DOMAINS,
     CONF_ENTITIES,
@@ -82,6 +83,7 @@ from .const import (
     CONF_RESTORE_LAST_UPDATED,
     CONF_RETRY_DELAYS,
     CONF_SNAPSHOT_INTERVAL,
+    DEFAULT_ALL_ENTITIES,
     DEFAULT_DOMAINS,
     DEFAULT_GRACE,
     DEFAULT_RESTORE_LAST_TRIGGERED,
@@ -302,6 +304,11 @@ class _RestoreJob:
         )
 
     @property
+    def _all_entities_enabled(self) -> bool:
+        data = {**self.entry.data, **self.entry.options}
+        return bool(data.get(CONF_ALL_ENTITIES, DEFAULT_ALL_ENTITIES))
+
+    @property
     def _restore_last_updated_enabled(self) -> bool:
         data = {**self.entry.data, **self.entry.options}
         return bool(
@@ -336,7 +343,15 @@ class _RestoreJob:
         labels: list[str] | None = None,
         areas: list[str] | None = None,
     ) -> set[str]:
-        return resolve_targets(self.hass, domains, entities, exclude, labels, areas)
+        return resolve_targets(
+            self.hass,
+            domains,
+            entities,
+            exclude,
+            labels,
+            areas,
+            self._all_entities_enabled,
+        )
 
     # ----- Lifecycle -----------------------------------------------------
 
@@ -984,20 +999,26 @@ def resolve_targets(
     exclude: list[str] | None = None,
     labels: list[str] | None = None,
     areas: list[str] | None = None,
+    all_entities: bool = False,
 ) -> set[str]:
     """Explicit entities, all states of the selected domains, and everything
-    reachable via the selected labels/areas — minus exclude.
+    reachable via the selected labels/areas — minus exclude. If all_entities
+    is set, every live entity is a target regardless of domains/entities/
+    labels/areas (exclude still applies).
 
     Shared between _RestoreJob (what actually gets patched) and config_flow
     (the live count / empty-selection check) so both can never disagree.
     """
-    out: set[str] = set(entities or [])
-    if domains:
-        for state in hass.states.async_all():
-            if state.domain in domains:
-                out.add(state.entity_id)
-    if labels or areas:
-        out |= _entities_for_labels_and_areas(hass, labels, areas)
+    if all_entities:
+        out = {state.entity_id for state in hass.states.async_all()}
+    else:
+        out = set(entities or [])
+        if domains:
+            for state in hass.states.async_all():
+                if state.domain in domains:
+                    out.add(state.entity_id)
+        if labels or areas:
+            out |= _entities_for_labels_and_areas(hass, labels, areas)
     out -= set(exclude or [])
     return out
 

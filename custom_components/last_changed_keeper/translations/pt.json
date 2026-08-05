@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Restaura a hora real de «última alteração» das entidades selecionadas a partir do recorder após um reinicio. Atua diretamente na própria entidade. A seleção atual abrange {count} entidades.",
         "data": {
+          "all_entities": "Rastrear todas as entidades (ignora domínios/entidades/etiquetas/áreas abaixo)",
           "domains": "Domínios",
           "entities": "Entidades individuais adicionais",
           "labels": "Etiquetas",
@@ -21,6 +22,7 @@
         "title": "Reconfigurar Last Changed Keeper",
         "description": "Ajustar a seleção. A seleção atual abrange {count} entidades.",
         "data": {
+          "all_entities": "Rastrear todas as entidades (ignora domínios/entidades/etiquetas/áreas abaixo)",
           "domains": "Domínios",
           "entities": "Entidades individuais adicionais",
           "labels": "Etiquetas",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – alterar seleção",
         "description": "A seleção atual abrange {count} entidades.",
         "data": {
+          "all_entities": "Rastrear todas as entidades (ignora domínios/entidades/etiquetas/áreas abaixo)",
           "domains": "Domínios",
           "entities": "Entidades individuais adicionais",
           "labels": "Etiquetas",

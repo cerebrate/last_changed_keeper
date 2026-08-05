@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Återställer den verkliga tiden för 'senast ändrad' för de valda entiteterna från recorder efter en omstart. Verkar direkt på själva entiteten. Det aktuella urvalet omfattar {count} entiteter.",
         "data": {
+          "all_entities": "Spåra alla entiteter (ignorerar domäner/entiteter/etiketter/områden nedan)",
           "domains": "Domäner",
           "entities": "Ytterligare enskilda entiteter",
           "labels": "Etiketter",
@@ -21,6 +22,7 @@
         "title": "Konfigurera om Last Changed Keeper",
         "description": "Justera urvalet. Det aktuella urvalet omfattar {count} entiteter.",
         "data": {
+          "all_entities": "Spåra alla entiteter (ignorerar domäner/entiteter/etiketter/områden nedan)",
           "domains": "Domäner",
           "entities": "Ytterligare enskilda entiteter",
           "labels": "Etiketter",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – ändra urval",
         "description": "Det aktuella urvalet omfattar {count} entiteter.",
         "data": {
+          "all_entities": "Spåra alla entiteter (ignorerar domäner/entiteter/etiketter/områden nedan)",
           "domains": "Domäner",
           "entities": "Ytterligare enskilda entiteter",
           "labels": "Etiketter",

@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Gendanner den virkelige 'sidst ændret'-tid for de valgte entiteter fra recorder efter en genstart. Virker direkte på selve entiteten. Det aktuelle udvalg omfatter {count} entiteter.",
         "data": {
+          "all_entities": "Spor alle enheder (ignorerer domæner/enheder/etiketter/områder nedenfor)",
           "domains": "Domæner",
           "entities": "Yderligere individuelle entiteter",
           "labels": "Mærkater",
@@ -21,6 +22,7 @@
         "title": "Genkonfigurer Last Changed Keeper",
         "description": "Justér udvalget. Det aktuelle udvalg omfatter {count} entiteter.",
         "data": {
+          "all_entities": "Spor alle enheder (ignorerer domæner/enheder/etiketter/områder nedenfor)",
           "domains": "Domæner",
           "entities": "Yderligere individuelle entiteter",
           "labels": "Mærkater",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – skift udvalg",
         "description": "Det aktuelle udvalg omfatter {count} entiteter.",
         "data": {
+          "all_entities": "Spor alle enheder (ignorerer domæner/enheder/etiketter/områder nedenfor)",
           "domains": "Domæner",
           "entities": "Yderligere individuelle entiteter",
           "labels": "Mærkater",

@@ -2,6 +2,7 @@
 
 DOMAIN = "last_changed_keeper"
 
+CONF_ALL_ENTITIES = "all_entities"
 CONF_DOMAINS = "domains"
 CONF_ENTITIES = "entities"
 CONF_LABELS = "labels"
@@ -14,6 +15,8 @@ CONF_RESTORE_LAST_TRIGGERED = "restore_last_triggered"
 
 DEFAULT_RESTORE_LAST_UPDATED = False
 DEFAULT_RESTORE_LAST_TRIGGERED = True
+# Default on: most users want everything covered, not a curated domain list.
+DEFAULT_ALL_ENTITIES = True
 
 SERVICE_RESTORE_NOW = "restore_now"
 SERVICE_VERIFY = "verify"

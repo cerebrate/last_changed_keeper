@@ -15,6 +15,7 @@ from homeassistant.helpers import selector
 
 from . import resolve_targets
 from .const import (
+    CONF_ALL_ENTITIES,
     CONF_AREAS,
     CONF_DOMAINS,
     CONF_ENTITIES,
@@ -25,6 +26,7 @@ from .const import (
     CONF_RESTORE_LAST_UPDATED,
     CONF_RETRY_DELAYS,
     CONF_SNAPSHOT_INTERVAL,
+    DEFAULT_ALL_ENTITIES,
     DEFAULT_DOMAINS,
     DEFAULT_GRACE,
     DEFAULT_RESTORE_LAST_TRIGGERED,
@@ -49,6 +51,10 @@ def _build_schema(hass: HomeAssistant, defaults: dict[str, Any]) -> vol.Schema:
     )
     return vol.Schema(
         {
+            vol.Optional(
+                CONF_ALL_ENTITIES,
+                default=defaults.get(CONF_ALL_ENTITIES, DEFAULT_ALL_ENTITIES),
+            ): selector.BooleanSelector(),
             vol.Optional(
                 CONF_DOMAINS, default=defaults.get(CONF_DOMAINS, DEFAULT_DOMAINS)
             ): selector.SelectSelector(
@@ -122,13 +128,20 @@ def _count_targets(
     exclude: list[str] | None = None,
     labels: list[str] | None = None,
     areas: list[str] | None = None,
+    all_entities: bool = False,
 ) -> int:
     """Number of entities affected by the selection (for the live count)."""
-    return len(resolve_targets(hass, domains, entities, exclude, labels, areas))
+    return len(
+        resolve_targets(hass, domains, entities, exclude, labels, areas, all_entities)
+    )
 
 
 def _is_empty(hass: HomeAssistant, user_input: dict[str, Any]) -> bool:
-    """True if the resulting target set (after exclude) would be empty."""
+    """True if the resulting target set (after exclude) would be empty.
+    Never true when "all entities" is on — that's a valid, deliberately
+    unrestricted selection, not an accidental empty one."""
+    if user_input.get(CONF_ALL_ENTITIES):
+        return False
     return (
         _count_targets(
             hass,
@@ -193,6 +206,7 @@ class LastChangedKeeperConfigFlow(ConfigFlow, domain=DOMAIN):
             defaults.get(CONF_EXCLUDE, []),
             defaults.get(CONF_LABELS, []),
             defaults.get(CONF_AREAS, []),
+            defaults.get(CONF_ALL_ENTITIES, DEFAULT_ALL_ENTITIES),
         )
         return self.async_show_form(
             step_id="user",
@@ -234,6 +248,7 @@ class LastChangedKeeperConfigFlow(ConfigFlow, domain=DOMAIN):
             defaults.get(CONF_EXCLUDE, []),
             defaults.get(CONF_LABELS, []),
             defaults.get(CONF_AREAS, []),
+            defaults.get(CONF_ALL_ENTITIES, DEFAULT_ALL_ENTITIES),
         )
         return self.async_show_form(
             step_id="reconfigure",
@@ -273,6 +288,7 @@ class LastChangedKeeperOptionsFlow(OptionsFlow):
             defaults.get(CONF_EXCLUDE, []),
             defaults.get(CONF_LABELS, []),
             defaults.get(CONF_AREAS, []),
+            defaults.get(CONF_ALL_ENTITIES, DEFAULT_ALL_ENTITIES),
         )
         return self.async_show_form(
             step_id="init",

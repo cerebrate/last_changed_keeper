@@ -5,6 +5,7 @@
         "title": "Last Changed Keeper",
         "description": "Gjenoppretter den virkelige 'sist endret'-tiden for de valgte entitetene fra recorder etter en omstart. Virker direkte på selve entiteten. Det gjeldende utvalget omfatter {count} entiteter.",
         "data": {
+          "all_entities": "Spor alle enheter (ignorerer domener/enheter/etiketter/områder nedenfor)",
           "domains": "Domener",
           "entities": "Flere enkeltentiteter",
           "labels": "Etiketter",
@@ -21,6 +22,7 @@
         "title": "Konfigurer Last Changed Keeper på nytt",
         "description": "Juster utvalget. Det gjeldende utvalget omfatter {count} entiteter.",
         "data": {
+          "all_entities": "Spor alle enheter (ignorerer domener/enheter/etiketter/områder nedenfor)",
           "domains": "Domener",
           "entities": "Flere enkeltentiteter",
           "labels": "Etiketter",
@@ -50,6 +52,7 @@
         "title": "Last Changed Keeper – endre utvalg",
         "description": "Det gjeldende utvalget omfatter {count} entiteter.",
         "data": {
+          "all_entities": "Spor alle enheter (ignorerer domener/enheter/etiketter/områder nedenfor)",
           "domains": "Domener",
           "entities": "Flere enkeltentiteter",
           "labels": "Etiketter",
