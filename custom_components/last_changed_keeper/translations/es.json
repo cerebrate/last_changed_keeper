@@ -15,6 +15,7 @@
           "snapshot_interval": "Instantánea periódica cada (segundos, 0 = desactivado)",
           "restore_last_updated": "Restaurar también last_updated",
           "restore_last_triggered": "Restaurar también last_triggered de automatizaciones/scripts",
+          "verify_after_boot": "Autocomprobación unos minutos tras el arranque (registra desviaciones)",
           "retry_delays": "Retardos de reintento en segundos (separados por comas)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Instantánea periódica cada (segundos, 0 = desactivado)",
           "restore_last_updated": "Restaurar también last_updated",
           "restore_last_triggered": "Restaurar también last_triggered de automatizaciones/scripts",
+          "verify_after_boot": "Autocomprobación unos minutos tras el arranque (registra desviaciones)",
           "retry_delays": "Retardos de reintento en segundos (separados por comas)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Instantánea periódica cada (segundos, 0 = desactivado)",
           "restore_last_updated": "Restaurar también last_updated",
           "restore_last_triggered": "Restaurar también last_triggered de automatizaciones/scripts",
+          "verify_after_boot": "Autocomprobación unos minutos tras el arranque (registra desviaciones)",
           "retry_delays": "Retardos de reintento en segundos (separados por comas)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "La verificación falló. Consulta el registro para más detalles."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Entidades restauradas"
+      }
     }
   }
 }

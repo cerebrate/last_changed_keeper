@@ -26,12 +26,14 @@ from .const import (
     CONF_RESTORE_LAST_UPDATED,
     CONF_RETRY_DELAYS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_VERIFY_AFTER_BOOT,
     DEFAULT_ALL_ENTITIES,
     DEFAULT_DOMAINS,
     DEFAULT_GRACE,
     DEFAULT_RESTORE_LAST_TRIGGERED,
     DEFAULT_RESTORE_LAST_UPDATED,
     DEFAULT_SNAPSHOT_INTERVAL,
+    DEFAULT_VERIFY_AFTER_BOOT,
     DOMAIN,
     RETRY_DELAYS,
 )
@@ -109,6 +111,12 @@ def _build_schema(hass: HomeAssistant, defaults: dict[str, Any]) -> vol.Schema:
                 CONF_RESTORE_LAST_TRIGGERED,
                 default=defaults.get(
                     CONF_RESTORE_LAST_TRIGGERED, DEFAULT_RESTORE_LAST_TRIGGERED
+                ),
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_VERIFY_AFTER_BOOT,
+                default=defaults.get(
+                    CONF_VERIFY_AFTER_BOOT, DEFAULT_VERIFY_AFTER_BOOT
                 ),
             ): selector.BooleanSelector(),
             vol.Optional(

@@ -15,6 +15,7 @@
           "snapshot_interval": "Pravidelný snímek každých (sekund, 0 = vypnuto)",
           "restore_last_updated": "Obnovit také last_updated",
           "restore_last_triggered": "Obnovit také last_triggered automatizací/skriptů",
+          "verify_after_boot": "Automatická kontrola pár minut po startu (zapíše odchylky do logu)",
           "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Pravidelný snímek každých (sekund, 0 = vypnuto)",
           "restore_last_updated": "Obnovit také last_updated",
           "restore_last_triggered": "Obnovit také last_triggered automatizací/skriptů",
+          "verify_after_boot": "Automatická kontrola pár minut po startu (zapíše odchylky do logu)",
           "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Pravidelný snímek každých (sekund, 0 = vypnuto)",
           "restore_last_updated": "Obnovit také last_updated",
           "restore_last_triggered": "Obnovit také last_triggered automatizací/skriptů",
+          "verify_after_boot": "Automatická kontrola pár minut po startu (zapíše odchylky do logu)",
           "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "Ověřovací průchod selhal. Podrobnosti najdete v logu."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Obnovené entity"
+      }
     }
   }
 }

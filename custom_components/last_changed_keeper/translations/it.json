@@ -15,6 +15,7 @@
           "snapshot_interval": "Snapshot periodico ogni (secondi, 0 = disattivato)",
           "restore_last_updated": "Ripristina anche last_updated",
           "restore_last_triggered": "Ripristina anche last_triggered di automazioni/script",
+          "verify_after_boot": "Auto-verifica pochi minuti dopo l'avvio (registra le discrepanze)",
           "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Snapshot periodico ogni (secondi, 0 = disattivato)",
           "restore_last_updated": "Ripristina anche last_updated",
           "restore_last_triggered": "Ripristina anche last_triggered di automazioni/script",
+          "verify_after_boot": "Auto-verifica pochi minuti dopo l'avvio (registra le discrepanze)",
           "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Snapshot periodico ogni (secondi, 0 = disattivato)",
           "restore_last_updated": "Ripristina anche last_updated",
           "restore_last_triggered": "Ripristina anche last_triggered di automazioni/script",
+          "verify_after_boot": "Auto-verifica pochi minuti dopo l'avvio (registra le discrepanze)",
           "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "La verifica non è riuscita. Controlla il log per i dettagli."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Entità ripristinate"
+      }
     }
   }
 }

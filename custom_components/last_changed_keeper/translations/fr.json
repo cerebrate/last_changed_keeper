@@ -15,6 +15,7 @@
           "snapshot_interval": "Instantané périodique toutes les (secondes, 0 = désactivé)",
           "restore_last_updated": "Restaurer aussi last_updated",
           "restore_last_triggered": "Restaurer aussi last_triggered des automatisations/scripts",
+          "verify_after_boot": "Auto-vérification quelques minutes après le démarrage (journalise les écarts)",
           "retry_delays": "Délais de relance en secondes (séparés par des virgules)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Instantané périodique toutes les (secondes, 0 = désactivé)",
           "restore_last_updated": "Restaurer aussi last_updated",
           "restore_last_triggered": "Restaurer aussi last_triggered des automatisations/scripts",
+          "verify_after_boot": "Auto-vérification quelques minutes après le démarrage (journalise les écarts)",
           "retry_delays": "Délais de relance en secondes (séparés par des virgules)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Instantané périodique toutes les (secondes, 0 = désactivé)",
           "restore_last_updated": "Restaurer aussi last_updated",
           "restore_last_triggered": "Restaurer aussi last_triggered des automatisations/scripts",
+          "verify_after_boot": "Auto-vérification quelques minutes après le démarrage (journalise les écarts)",
           "retry_delays": "Délais de relance en secondes (séparés par des virgules)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "La vérification a échoué. Consultez le journal pour plus de détails."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Entités restaurées"
+      }
     }
   }
 }

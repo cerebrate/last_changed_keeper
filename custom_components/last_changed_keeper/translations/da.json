@@ -15,6 +15,7 @@
           "snapshot_interval": "Periodisk øjebliksbillede hvert (sekund, 0 = fra)",
           "restore_last_updated": "Gendan også last_updated",
           "restore_last_triggered": "Gendan også last_triggered for automatiseringer/scripts",
+          "verify_after_boot": "Selvtest få minutter efter opstart (logger afvigelser)",
           "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Periodisk øjebliksbillede hvert (sekund, 0 = fra)",
           "restore_last_updated": "Gendan også last_updated",
           "restore_last_triggered": "Gendan også last_triggered for automatiseringer/scripts",
+          "verify_after_boot": "Selvtest få minutter efter opstart (logger afvigelser)",
           "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Periodisk øjebliksbillede hvert (sekund, 0 = fra)",
           "restore_last_updated": "Gendan også last_updated",
           "restore_last_triggered": "Gendan også last_triggered for automatiseringer/scripts",
+          "verify_after_boot": "Selvtest få minutter efter opstart (logger afvigelser)",
           "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "Verifikationen mislykkedes. Se loggen for detaljer."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Gendannede enheder"
+      }
     }
   }
 }

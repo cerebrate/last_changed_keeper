@@ -15,6 +15,7 @@
           "snapshot_interval": "Periodisk øyeblikksbilde hvert (sekund, 0 = av)",
           "restore_last_updated": "Gjenopprett også last_updated",
           "restore_last_triggered": "Gjenopprett også last_triggered for automatiseringer/skript",
+          "verify_after_boot": "Selvtest noen minutter etter oppstart (logger avvik)",
           "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Periodisk øyeblikksbilde hvert (sekund, 0 = av)",
           "restore_last_updated": "Gjenopprett også last_updated",
           "restore_last_triggered": "Gjenopprett også last_triggered for automatiseringer/skript",
+          "verify_after_boot": "Selvtest noen minutter etter oppstart (logger avvik)",
           "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Periodisk øyeblikksbilde hvert (sekund, 0 = av)",
           "restore_last_updated": "Gjenopprett også last_updated",
           "restore_last_triggered": "Gjenopprett også last_triggered for automatiseringer/skript",
+          "verify_after_boot": "Selvtest noen minutter etter oppstart (logger avvik)",
           "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "Verifiseringen mislyktes. Se loggen for detaljer."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Gjenopprettede enheter"
+      }
     }
   }
 }

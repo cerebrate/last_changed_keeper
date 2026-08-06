@@ -15,6 +15,7 @@
           "snapshot_interval": "Periodisk ögonblicksbild var (sekunder, 0 = av)",
           "restore_last_updated": "Återställ även last_updated",
           "restore_last_triggered": "Återställ även last_triggered för automatiseringar/skript",
+          "verify_after_boot": "Självtest några minuter efter uppstart (loggar avvikelser)",
           "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Periodisk ögonblicksbild var (sekunder, 0 = av)",
           "restore_last_updated": "Återställ även last_updated",
           "restore_last_triggered": "Återställ även last_triggered för automatiseringar/skript",
+          "verify_after_boot": "Självtest några minuter efter uppstart (loggar avvikelser)",
           "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Periodisk ögonblicksbild var (sekunder, 0 = av)",
           "restore_last_updated": "Återställ även last_updated",
           "restore_last_triggered": "Återställ även last_triggered för automatiseringar/skript",
+          "verify_after_boot": "Självtest några minuter efter uppstart (loggar avvikelser)",
           "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "Verifieringen misslyckades. Se loggen för detaljer."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Återställda entiteter"
+      }
     }
   }
 }

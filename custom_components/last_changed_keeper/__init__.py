@@ -41,7 +41,7 @@ from homeassistant.components.recorder.history import (
     get_significant_states,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import (
     CALLBACK_TYPE,
     Event,
@@ -71,6 +71,7 @@ from homeassistant.util.read_only_dict import ReadOnlyDict
 
 from .const import (
     ATTR_LAST_TRIGGERED,
+    BULK_BATCH_SIZE,
     BULK_WINDOW_DAYS,
     CONF_ALL_ENTITIES,
     CONF_AREAS,
@@ -83,12 +84,14 @@ from .const import (
     CONF_RESTORE_LAST_UPDATED,
     CONF_RETRY_DELAYS,
     CONF_SNAPSHOT_INTERVAL,
+    CONF_VERIFY_AFTER_BOOT,
     DEFAULT_ALL_ENTITIES,
     DEFAULT_DOMAINS,
     DEFAULT_GRACE,
     DEFAULT_RESTORE_LAST_TRIGGERED,
     DEFAULT_RESTORE_LAST_UPDATED,
     DEFAULT_SNAPSHOT_INTERVAL,
+    DEFAULT_VERIFY_AFTER_BOOT,
     DOMAIN,
     EVENT_RESTORED,
     HISTORY_DEPTH,
@@ -98,14 +101,19 @@ from .const import (
     ISSUE_INCOMPATIBLE,
     LAST_TRIGGERED_DOMAINS,
     MARGIN_SECONDS,
+    MAX_RUN_HISTORY,
     RETRY_DELAYS,
     SERVICE_RESTORE_NOW,
     SERVICE_VERIFY,
     STORAGE_KEY,
+    STORAGE_KEY_RUNS,
     STORAGE_VERSION,
+    VERIFY_AFTER_BOOT_DELAY,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = [Platform.SENSOR]
 
 # Lazily evaluated (PEP 695), so this forward-references _RestoreJob safely.
 type LckConfigEntry = ConfigEntry[_RestoreJob]
@@ -134,8 +142,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: LckConfigEntry) -> bool:
     store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     snapshot: dict[str, str] = await store.async_load() or {}
 
-    job = _RestoreJob(hass, entry, store, snapshot)
+    runs_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_RUNS)
+    run_history: list[dict] = await runs_store.async_load() or []
+
+    job = _RestoreJob(hass, entry, store, snapshot, runs_store, run_history)
     entry.runtime_data = job
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     entry.async_on_unload(job.shutdown)
@@ -176,12 +189,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: LckConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: LckConfigEntry) -> bool:
     """Unload the entry.
 
-    Nothing to clean up manually: job.shutdown() runs via the
-    async_on_unload callback above, and core deletes entry.runtime_data
-    itself once this returns True. The service is registered in
-    async_setup() and is intentionally NOT torn down here.
+    Beyond the platforms, nothing to clean up manually: job.shutdown() runs
+    via the async_on_unload callback above, and core deletes
+    entry.runtime_data itself once this returns True. The service is
+    registered in async_setup() and is intentionally NOT torn down here.
     """
-    return True
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: LckConfigEntry) -> None:
@@ -262,6 +275,8 @@ class _RestoreJob:
         entry: ConfigEntry,
         store: Store,
         snapshot: dict[str, str],
+        runs_store: Store | None = None,
+        run_history: list[dict] | None = None,
     ) -> None:
         self.hass = hass
         self.entry = entry
@@ -276,6 +291,14 @@ class _RestoreJob:
         self._also_restore_triggered = False
         self._final_fired = False
         self.stats: dict[str, object] = {}
+
+        # ----- Feature: rolling run history + boot self-check --------------
+        # runs_store is None in direct unit-test construction; persistence is
+        # then simply skipped (run_history stays in-memory only).
+        self._runs_store = runs_store
+        self.run_history: list[dict] = run_history or []
+        self._run_active = False
+        self._unsub_verify_timer: CALLBACK_TYPE | None = None
 
         # ----- Feature: re-patch on runtime re-registration ---------------
         self._unsub_reregister_listener: CALLBACK_TYPE | None = None
@@ -323,6 +346,11 @@ class _RestoreJob:
         )
 
     @property
+    def _verify_after_boot_enabled(self) -> bool:
+        data = {**self.entry.data, **self.entry.options}
+        return bool(data.get(CONF_VERIFY_AFTER_BOOT, DEFAULT_VERIFY_AFTER_BOOT))
+
+    @property
     def _retry_delays(self) -> tuple[int, ...]:
         data = {**self.entry.data, **self.entry.options}
         return _parse_delays(data.get(CONF_RETRY_DELAYS), RETRY_DELAYS)
@@ -367,6 +395,9 @@ class _RestoreJob:
         self._cancel_flush_timer()
         self._dirty.clear()
         self._dirty_since = None
+        if self._unsub_verify_timer is not None:
+            self._unsub_verify_timer()
+            self._unsub_verify_timer = None
 
     @callback
     def _stop_boot_machinery(self) -> None:
@@ -536,7 +567,16 @@ class _RestoreJob:
             "(bulk: %d entities)",
             patched, len(self._pending), len(bulk),
         )
+        # Record boot passes (not service-triggered ones) in the rolling run
+        # history — before firing the event, so the final-event update below
+        # replaces this record instead of appending a second one.
+        if not single_pass:
+            self._run_active = True
+            self._persist_run_stats(new_run=True)
         self._fire_restored_event(final=not self._pending)
+
+        if not single_pass and self._verify_after_boot_enabled:
+            self._schedule_boot_verify()
 
         if single_pass or not self._pending:
             return patched
@@ -646,6 +686,10 @@ class _RestoreJob:
             if self._final_fired:
                 return
             self._final_fired = True
+            # Fold the late-pass results (retries/listener) into this run's
+            # history record, replacing the pass-0 snapshot of the stats.
+            if self._run_active:
+                self._persist_run_stats(new_run=False)
         self.hass.bus.async_fire(
             EVENT_RESTORED,
             {
@@ -655,6 +699,65 @@ class _RestoreJob:
                 "final": final,
             },
         )
+
+    # ----- Run history + post-boot self-check ------------------------------
+
+    @callback
+    def _persist_run_stats(self, *, new_run: bool) -> None:
+        """Record the current stats in the rolling run history (last
+        MAX_RUN_HISTORY boot passes). new_run appends; otherwise the latest
+        record is replaced in place (final event, verify result). Skips
+        disk persistence when no runs store was injected (unit tests)."""
+        record = dict(self.stats)
+        if new_run or not self.run_history:
+            self.run_history.append(record)
+        else:
+            self.run_history[-1] = record
+        del self.run_history[:-MAX_RUN_HISTORY]
+        if self._runs_store is not None:
+            self._runs_store.async_delay_save(lambda: list(self.run_history), 10)
+
+    @callback
+    def _schedule_boot_verify(self) -> None:
+        """Optional self-check: run a verify pass a few minutes after the
+        boot pass (late enough that the +30/+90/+180s retries are done) and
+        log any mismatches — catches "the restore silently did nothing"
+        without waiting for a user to notice wrong timestamps."""
+        if self._unsub_verify_timer is not None:
+            self._unsub_verify_timer()
+
+        @callback
+        def _fire(_now) -> None:
+            self._unsub_verify_timer = None
+            self.hass.async_create_task(self._boot_verify())
+
+        self._unsub_verify_timer = async_call_later(
+            self.hass, VERIFY_AFTER_BOOT_DELAY, _fire
+        )
+
+    async def _boot_verify(self) -> None:
+        try:
+            result = await self.async_verify()
+        except Exception:
+            _LOGGER.exception("Post-boot verify pass failed")
+            return
+        mismatches = result.get("mismatches") or []
+        self.stats["verify_mismatches"] = len(mismatches)
+        if mismatches:
+            _LOGGER.warning(
+                "Post-boot verify: %d of %d entities deviate from the "
+                "recorder/store-derived value (first: %s)",
+                len(mismatches),
+                result.get("checked", 0),
+                ", ".join(m["entity_id"] for m in mismatches[:10]),
+            )
+        else:
+            _LOGGER.info(
+                "Post-boot verify: all %d entities consistent",
+                result.get("checked", 0),
+            )
+        if self._run_active:
+            self._persist_run_stats(new_run=False)
 
     # ----- Resolving the real timestamp ----------------------------------
 
@@ -740,15 +843,27 @@ class _RestoreJob:
         return None
 
     async def _bulk_fetch(self, entity_ids: list[str]) -> dict[str, list]:
-        """One recorder query for all candidates over the bulk window."""
+        """Recorder query for all candidates over the bulk window, split into
+        batches of BULK_BATCH_SIZE: with "track all entities" the candidate
+        list can be thousands of entities, and a single IN(...) query that
+        long gets slow and memory-hungry. A failed batch only loses its own
+        entities (they fall back to snapshot/per-entity queries)."""
         start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
-        try:
-            return await get_instance(self.hass).async_add_executor_job(
-                _bulk_query, self.hass, start, entity_ids
-            )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Bulk recorder query failed: %s", err)
-            return {}
+        out: dict[str, list] = {}
+        for i in range(0, len(entity_ids), BULK_BATCH_SIZE):
+            chunk = entity_ids[i : i + BULK_BATCH_SIZE]
+            try:
+                out.update(
+                    await get_instance(self.hass).async_add_executor_job(
+                        _bulk_query, self.hass, start, chunk
+                    )
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Bulk recorder query failed (batch %d, %d entities): %s",
+                    i // BULK_BATCH_SIZE, len(chunk), err,
+                )
+        return out
 
     # ----- Applying ------------------------------------------------------
 

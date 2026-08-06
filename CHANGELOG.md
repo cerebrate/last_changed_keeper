@@ -2,6 +2,27 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] — 2026-08-05
+### Added
+- **Status sensor.** A diagnostic sensor ("Restored entities") whose state is
+  the number of entities patched in the last pass, with the full run stats,
+  the degraded flag and the run history as attributes — the diagnostics
+  data, visible on a dashboard without downloading anything.
+- **Rolling run history.** The stats of the last 10 boot passes are persisted
+  (`.storage/last_changed_keeper.runs`) and exposed on the status sensor —
+  "how well did restore work over the last restarts" at a glance.
+- **Optional post-boot self-check.** A new toggle runs a `verify` pass a few
+  minutes after the boot pass and logs a warning listing any entities whose
+  live `last_changed` deviates from the recorder/store-derived value —
+  catches "the restore silently did nothing" without waiting for someone to
+  notice wrong timestamps. Off by default.
+
+### Changed
+- **Bulk recorder query is now batched** (500 entities per query). With
+  "track all entities" the candidate list can be thousands of entities; one
+  giant `IN (...)` query gets slow and memory-hungry, and a single failure
+  used to lose the whole bulk result — now it only loses that batch.
+
 ## [0.8.0] — 2026-08-05
 ### Added
 - **"Track all entities" toggle.** A new switch at the top of the setup /

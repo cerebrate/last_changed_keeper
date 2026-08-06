@@ -15,6 +15,7 @@
           "snapshot_interval": "Periodischer Snapshot alle (Sekunden, 0 = aus)",
           "restore_last_updated": "Auch last_updated wiederherstellen",
           "restore_last_triggered": "Auch last_triggered von Automatisierungen/Skripten wiederherstellen",
+          "verify_after_boot": "Selbsttest wenige Minuten nach dem Start (loggt Abweichungen)",
           "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Periodischer Snapshot alle (Sekunden, 0 = aus)",
           "restore_last_updated": "Auch last_updated wiederherstellen",
           "restore_last_triggered": "Auch last_triggered von Automatisierungen/Skripten wiederherstellen",
+          "verify_after_boot": "Selbsttest wenige Minuten nach dem Start (loggt Abweichungen)",
           "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Periodischer Snapshot alle (Sekunden, 0 = aus)",
           "restore_last_updated": "Auch last_updated wiederherstellen",
           "restore_last_triggered": "Auch last_triggered von Automatisierungen/Skripten wiederherstellen",
+          "verify_after_boot": "Selbsttest wenige Minuten nach dem Start (loggt Abweichungen)",
           "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "Der Prüflauf ist fehlgeschlagen. Details siehe Log."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Wiederhergestellte Entities"
+      }
     }
   }
 }

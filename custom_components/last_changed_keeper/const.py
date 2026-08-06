@@ -12,9 +12,15 @@ CONF_GRACE = "grace_seconds"
 CONF_RESTORE_LAST_UPDATED = "restore_last_updated"
 CONF_RETRY_DELAYS = "retry_delays"
 CONF_RESTORE_LAST_TRIGGERED = "restore_last_triggered"
+CONF_VERIFY_AFTER_BOOT = "verify_after_boot"
 
 DEFAULT_RESTORE_LAST_UPDATED = False
 DEFAULT_RESTORE_LAST_TRIGGERED = True
+DEFAULT_VERIFY_AFTER_BOOT = False
+
+# Delay (seconds) after the boot pass before the optional self-check verify
+# pass runs — late enough that the retry passes (RETRY_DELAYS) are done.
+VERIFY_AFTER_BOOT_DELAY = 300
 # Default on: most users want everything covered, not a curated domain list.
 DEFAULT_ALL_ENTITIES = True
 
@@ -42,6 +48,11 @@ EVENT_RESTORED = f"{DOMAIN}_restored"
 # Snapshot store (fallback when the recorder no longer has the entity).
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.snapshot"
+
+# Rolling history of the last boot-pass stats (feeds the status sensor and
+# diagnostics: "how well did restore work over the last N restarts").
+STORAGE_KEY_RUNS = f"{DOMAIN}.runs"
+MAX_RUN_HISTORY = 10
 
 # How often (seconds) to write a periodic snapshot in addition to the one on
 # clean shutdown — hedges against crashes/power loss where the shutdown
@@ -79,6 +90,11 @@ HISTORY_DEPTH = 100
 
 # Time window (days) for the bulk query of all entities at once.
 BULK_WINDOW_DAYS = 30
+
+# With "track all entities" the candidate list can be thousands of entities;
+# one recorder query with an IN(...) list that long gets slow and
+# memory-hungry. Split into chunks of this size instead.
+BULK_BATCH_SIZE = 500
 
 # States that are not real usage (mainly restart artifacts).
 INVALID_STATES = ("unavailable", "unknown")

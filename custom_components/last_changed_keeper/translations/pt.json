@@ -15,6 +15,7 @@
           "snapshot_interval": "Instantâneo periódico a cada (segundos, 0 = desativado)",
           "restore_last_updated": "Restaurar também last_updated",
           "restore_last_triggered": "Restaurar também last_triggered de automações/scripts",
+          "verify_after_boot": "Autoverificação alguns minutos após o arranque (regista desvios)",
           "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Instantâneo periódico a cada (segundos, 0 = desativado)",
           "restore_last_updated": "Restaurar também last_updated",
           "restore_last_triggered": "Restaurar também last_triggered de automações/scripts",
+          "verify_after_boot": "Autoverificação alguns minutos após o arranque (regista desvios)",
           "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Instantâneo periódico a cada (segundos, 0 = desativado)",
           "restore_last_updated": "Restaurar também last_updated",
           "restore_last_triggered": "Restaurar também last_triggered de automações/scripts",
+          "verify_after_boot": "Autoverificação alguns minutos após o arranque (regista desvios)",
           "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "A verificação falhou. Consulte o log para mais detalhes."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Entidades restauradas"
+      }
     }
   }
 }

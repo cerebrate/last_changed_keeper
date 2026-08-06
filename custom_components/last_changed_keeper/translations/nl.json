@@ -15,6 +15,7 @@
           "snapshot_interval": "Periodieke momentopname elke (seconden, 0 = uit)",
           "restore_last_updated": "Ook last_updated herstellen",
           "restore_last_triggered": "Ook last_triggered van automatiseringen/scripts herstellen",
+          "verify_after_boot": "Zelfcontrole enkele minuten na het opstarten (logt afwijkingen)",
           "retry_delays": "Herhaalvertragingen in seconden (komma-gescheiden)"
         }
       },
@@ -32,6 +33,7 @@
           "snapshot_interval": "Periodieke momentopname elke (seconden, 0 = uit)",
           "restore_last_updated": "Ook last_updated herstellen",
           "restore_last_triggered": "Ook last_triggered van automatiseringen/scripts herstellen",
+          "verify_after_boot": "Zelfcontrole enkele minuten na het opstarten (logt afwijkingen)",
           "retry_delays": "Herhaalvertragingen in seconden (komma-gescheiden)"
         }
       }
@@ -62,6 +64,7 @@
           "snapshot_interval": "Periodieke momentopname elke (seconden, 0 = uit)",
           "restore_last_updated": "Ook last_updated herstellen",
           "restore_last_triggered": "Ook last_triggered van automatiseringen/scripts herstellen",
+          "verify_after_boot": "Zelfcontrole enkele minuten na het opstarten (logt afwijkingen)",
           "retry_delays": "Herhaalvertragingen in seconden (komma-gescheiden)"
         }
       }
@@ -96,6 +99,13 @@
     },
     "verify_failed": {
       "message": "De verificatie is mislukt. Bekijk het logboek voor details."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Herstelde entiteiten"
+      }
     }
   }
 }

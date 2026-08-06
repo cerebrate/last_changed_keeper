@@ -6,5 +6,12 @@
     "verify": {
       "service": "mdi:clipboard-check-outline"
     }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "default": "mdi:history"
+      }
+    }
   }
 }
