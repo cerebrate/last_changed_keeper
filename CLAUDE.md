@@ -45,8 +45,13 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    run can never disagree.
 2. Split into candidates (state is fresh/a restart artifact, within `grace`)
    vs. skip (already genuinely used since boot).
-3. One batched recorder query for all candidates (`_bulk_fetch`, chunked by
-   `BULK_BATCH_SIZE` to avoid a huge `IN (...)`).
+3. Recorder history for all candidates, fetched in chunks of
+   `BULK_BATCH_SIZE` to avoid a huge `IN (...)` and **streamed** one batch at
+   a time (`_iter_bulk_batches`). Steps 3 and 4 are interleaved per batch:
+   the caller resolves a batch and drops it before the next query runs, so
+   peak memory is one batch rather than the whole installation's 30-day
+   history. Both the generator and the caller must release their reference —
+   see the `del bulk` in each consumer.
 4. Per entity, `_resolve()` picks the real timestamp in this priority order:
    **bulk result → incremental/periodic snapshot store (if newer for the same
    value) → deep per-entity recorder query → best-effort unbounded run**. A

@@ -4,7 +4,8 @@ Restores the real last change time (`last_changed`) of selected entities after a
 Home Assistant restart — directly on the entity.
 
 Sources (in this order):
-1. Recorder bulk query (one query for all entities) — fast on startup.
+1. Recorder bulk query (batched over all candidates, streamed one batch at
+   a time so peak memory stays at one batch) — fast on startup.
 2. Incremental/periodic store (see async_write_snapshot and
    _on_target_state_changed) — preferred over the bulk result when it holds a
    newer, still-usable timestamp for the same value (e.g. recorder commit
@@ -30,7 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -523,27 +524,33 @@ class _RestoreJob:
                 continue  # already really used since boot
             candidates.append(entity_id)
 
-        bulk = await self._bulk_fetch(candidates) if candidates else {}
-
         patched = 0
         patched_triggered = 0
-        for entity_id in candidates:
-            # Re-validate: the bulk query above awaited the recorder executor,
-            # during which this entity may have gone unavailable or genuinely
-            # changed for real — either way the state captured before the
-            # await is stale and must not be trusted anymore.
-            live = self.hass.states.get(entity_id)
-            if live is None or live.state in INVALID_STATES:
-                self._pending.add(entity_id)
-                continue
-            if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
-                continue  # changed for real while we were awaiting the query
-            if await self._maybe_restore_last_triggered(entity_id):
-                patched_triggered += 1
-            ts = await self._resolve(entity_id, live, bulk.get(entity_id))
-            if ts is not None:
-                self._apply(live, ts, entity_id)
-                patched += 1
+        bulk_entities = 0
+        # Resolve each batch as it arrives and drop it again, so only one
+        # batch of recorder history is resident at a time — see
+        # _iter_bulk_batches.
+        async for chunk, bulk in self._iter_bulk_batches(candidates):
+            bulk_entities += len(bulk)
+            for entity_id in chunk:
+                # Re-validate: the bulk query above awaited the recorder
+                # executor, during which this entity may have gone
+                # unavailable or genuinely changed for real — either way the
+                # state captured before the await is stale and must not be
+                # trusted anymore.
+                live = self.hass.states.get(entity_id)
+                if live is None or live.state in INVALID_STATES:
+                    self._pending.add(entity_id)
+                    continue
+                if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
+                    continue  # changed for real while we were awaiting the query
+                if await self._maybe_restore_last_triggered(entity_id):
+                    patched_triggered += 1
+                ts = await self._resolve(entity_id, live, bulk.get(entity_id))
+                if ts is not None:
+                    self._apply(live, ts, entity_id)
+                    patched += 1
+            del bulk  # released before the next batch is fetched
 
         # Resolve a stale repair issue once the cache patch works again
         # (e.g. after an HA update). Idempotent.
@@ -554,7 +561,7 @@ class _RestoreJob:
             "started": self._startup.isoformat(),
             "targets": len(targets),
             "candidates": len(candidates),
-            "bulk_entities": len(bulk),
+            "bulk_entities": bulk_entities,
             "patched_immediate": patched,
             "patched_total": patched,
             "patched_last_triggered": patched_triggered,
@@ -565,7 +572,7 @@ class _RestoreJob:
         _LOGGER.info(
             "Last Changed Keeper: pass 0 — %d patched, %d pending "
             "(bulk: %d entities)",
-            patched, len(self._pending), len(bulk),
+            patched, len(self._pending), bulk_entities,
         )
         # Record boot passes (not service-triggered ones) in the rolling run
         # history — before firing the event, so the final-event update below
@@ -842,28 +849,47 @@ class _RestoreJob:
             return snap_dt
         return None
 
-    async def _bulk_fetch(self, entity_ids: list[str]) -> dict[str, list]:
-        """Recorder query for all candidates over the bulk window, split into
-        batches of BULK_BATCH_SIZE: with "track all entities" the candidate
-        list can be thousands of entities, and a single IN(...) query that
-        long gets slow and memory-hungry. A failed batch only loses its own
-        entities (they fall back to snapshot/per-entity queries)."""
+    async def _iter_bulk_batches(
+        self, entity_ids: list[str]
+    ) -> AsyncIterator[tuple[list[str], dict[str, list]]]:
+        """Yield recorder history for the bulk window one batch at a time.
+
+        Split into batches of BULK_BATCH_SIZE because with "track all
+        entities" the candidate list can be thousands of entities, and a
+        single IN(...) query that long gets slow and memory-hungry.
+
+        Yielding per batch rather than returning one merged dict is what
+        bounds peak memory. The window is BULK_WINDOW_DAYS wide and the rows
+        come back as full state objects, so the merged result for a large
+        installation is every significant state change of every entity over
+        a month — easily gigabytes, and all of it was previously held live
+        for the whole resolve pass. Streaming caps the resident set at one
+        batch instead of the entire installation.
+
+        Both this generator and the caller must drop their reference to a
+        batch before the next query runs, or the peak is two batches rather
+        than one; hence the explicit release after the yield below and the
+        matching `del bulk` in each caller's loop.
+
+        A failed batch yields an empty result but still yields its chunk, so
+        those entities fall back to the snapshot/per-entity path in
+        `_resolve` exactly as before instead of being skipped.
+        """
         start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
-        out: dict[str, list] = {}
         for i in range(0, len(entity_ids), BULK_BATCH_SIZE):
             chunk = entity_ids[i : i + BULK_BATCH_SIZE]
             try:
-                out.update(
-                    await get_instance(self.hass).async_add_executor_job(
-                        _bulk_query, self.hass, start, chunk
-                    )
+                result = await get_instance(self.hass).async_add_executor_job(
+                    _bulk_query, self.hass, start, chunk
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "Bulk recorder query failed (batch %d, %d entities): %s",
                     i // BULK_BATCH_SIZE, len(chunk), err,
                 )
-        return out
+                result = {}
+            yield chunk, result
+            result = {}
 
     # ----- Applying ------------------------------------------------------
 
@@ -1124,29 +1150,36 @@ class _RestoreJob:
         value for every current target, without patching anything. Returns
         the entities where they deviate — useful for diagnosing "the value
         looks wrong" reports without having to reason through the resolve
-        chain by hand."""
+        chain by hand.
+
+        Unlike the boot pass this checks every target, not just the fresh
+        candidates, so it is the heaviest recorder consumer in the
+        integration — it is streamed batch by batch for the same reason (see
+        _iter_bulk_batches), and only the mismatch list is accumulated.
+        """
         domains, entities, exclude, _, labels, areas = self._config
         entity_ids = sorted(self._targets(domains, entities, exclude, labels, areas))
-        bulk = await self._bulk_fetch(entity_ids) if entity_ids else {}
 
         mismatches: list[dict[str, Any]] = []
-        for entity_id in entity_ids:
-            live = self.hass.states.get(entity_id)
-            if live is None or live.state in INVALID_STATES:
-                continue
-            expected = await self._resolve(entity_id, live, bulk.get(entity_id))
-            if expected is None:
-                continue
-            diff = (live.last_changed - expected).total_seconds()
-            if abs(diff) > MARGIN_SECONDS:
-                mismatches.append(
-                    {
-                        "entity_id": entity_id,
-                        "live_last_changed": live.last_changed.isoformat(),
-                        "expected_last_changed": expected.isoformat(),
-                        "diff_seconds": round(diff, 1),
-                    }
-                )
+        async for chunk, bulk in self._iter_bulk_batches(entity_ids):
+            for entity_id in chunk:
+                live = self.hass.states.get(entity_id)
+                if live is None or live.state in INVALID_STATES:
+                    continue
+                expected = await self._resolve(entity_id, live, bulk.get(entity_id))
+                if expected is None:
+                    continue
+                diff = (live.last_changed - expected).total_seconds()
+                if abs(diff) > MARGIN_SECONDS:
+                    mismatches.append(
+                        {
+                            "entity_id": entity_id,
+                            "live_last_changed": live.last_changed.isoformat(),
+                            "expected_last_changed": expected.isoformat(),
+                            "diff_seconds": round(diff, 1),
+                        }
+                    )
+            del bulk  # released before the next batch is fetched
         return {"checked": len(entity_ids), "mismatches": mismatches}
 
 
