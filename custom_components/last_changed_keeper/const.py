@@ -94,7 +94,16 @@ BULK_WINDOW_DAYS = 30
 # With "track all entities" the candidate list can be thousands of entities;
 # one recorder query with an IN(...) list that long gets slow and
 # memory-hungry. Split into chunks of this size instead.
-BULK_BATCH_SIZE = 500
+#
+# Since the bulk query is streamed batch by batch (see _iter_bulk_batches)
+# rather than merged, this is also the peak-memory knob: one batch of
+# BULK_WINDOW_DAYS-wide history is resident at a time, so the ceiling is
+# roughly BULK_BATCH_SIZE x (rows per entity in the window) x row size.
+# Chatty entities (power meters, frequently-polled sensors) can contribute
+# tens of thousands of rows each, so keep this well below the entity count
+# of a large installation; the cost of a smaller value is only more
+# round-trips, which the recorder handles far better than a huge result set.
+BULK_BATCH_SIZE = 250
 
 # States that are not real usage (mainly restart artifacts).
 INVALID_STATES = ("unavailable", "unknown")
