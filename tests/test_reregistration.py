@@ -126,6 +126,100 @@ async def test_reregistration_retries_when_not_immediately_resolvable(
     assert live.last_changed == stale
 
 
+async def test_reregistration_retry_ladder_does_not_grow_on_repeated_failure(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Regression: a retry that fails *again* must not arm a fresh ladder.
+
+    _attempt_reregister_patch runs both as the first attempt and as every
+    retry attempt. When it armed the retry ladder itself, each failing retry
+    scheduled len(RETRY_DELAYS) more timers without cancelling the ones
+    already armed, so the number of in-flight attempts multiplied every
+    round until the grace window closed. Each attempt issues its own
+    recorder query, so on a large installation this exhausted memory within
+    minutes of any entity that kept failing to resolve.
+    """
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    attempts: list[str] = []
+    original = job._attempt_reregister_patch
+
+    async def _counting_attempt(entity_id: str, grace: float) -> bool:
+        attempts.append(entity_id)
+        return await original(entity_id, grace)
+
+    monkeypatch.setattr(job, "_attempt_reregister_patch", _counting_attempt)
+
+    hass.states.async_remove("light.kitchen")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+
+    # Nothing resolvable -> the first attempt failed and armed one ladder.
+    assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
+
+    # Drive every rung while the entity stays unresolvable. The ladder must
+    # never exceed its original size, however many rungs have already failed.
+    start = dt_util.utcnow()
+    for delay in RETRY_DELAYS:
+        async_fire_time_changed(hass, start + timedelta(seconds=delay + 1))
+        await hass.async_block_till_done()
+        armed = job._reregister_retry_timers.get("light.kitchen", [])
+        assert len(armed) <= len(RETRY_DELAYS)
+
+    # Exactly one initial attempt plus one per retry delay - not a multiple.
+    assert len(attempts) == 1 + len(RETRY_DELAYS)
+    # Ladder exhausted: the entry is pruned rather than left behind holding
+    # already-fired timers (one stale entry per entity, forever, otherwise).
+    assert "light.kitchen" not in job._reregister_retry_timers
+
+
+async def test_successful_retry_cancels_the_rest_of_the_ladder(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """Once a retry resolves the entity, the remaining rungs are dropped
+    instead of running out against an already-patched state."""
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_remove("light.kitchen")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
+
+    stale = dt_util.utcnow() - timedelta(days=1)
+    job._snapshot["light.kitchen"] = {"s": "on", "t": stale.isoformat()}
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=RETRY_DELAYS[0] + 1)
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get("light.kitchen").last_changed == stale
+    assert "light.kitchen" not in job._reregister_retry_timers
+
+
+async def test_new_reregistration_replaces_armed_ladder(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """A flapping entity replaces its armed ladder instead of stacking a
+    second one alongside it."""
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    for _ in range(3):
+        hass.states.async_remove("light.kitchen")
+        await hass.async_block_till_done()
+        hass.states.async_set("light.kitchen", "on")
+        await hass.async_block_till_done()
+        assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
+
+
 async def test_reregistration_of_untargeted_entity_is_ignored(
     recorder_mock, enable_custom_integrations, hass: HomeAssistant
 ) -> None:

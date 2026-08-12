@@ -974,16 +974,33 @@ class _RestoreJob:
 
     async def _patch_reregistered(self, entity_id: str, grace: float) -> bool:
         """Entry point for a fresh re-registration event: drops any retries
-        still scheduled from a previous flap of the same entity, then makes
-        one attempt right away."""
+        still scheduled from a previous flap of the same entity, makes one
+        attempt right away, and — only here — arms the retry ladder if that
+        attempt resolved nothing.
+
+        Arming the ladder exclusively at this single entry point is what
+        bounds the retry count: the timers themselves run
+        _attempt_reregister_patch, which never schedules, so one
+        re-registration can only ever produce len(retry_delays) retries.
+        """
         self._cancel_reregister_retry(entity_id)
-        return await self._attempt_reregister_patch(entity_id, grace)
+        if await self._attempt_reregister_patch(entity_id, grace):
+            return True
+        self._schedule_reregister_retries(entity_id, grace)
+        return False
 
     async def _attempt_reregister_patch(self, entity_id: str, grace: float) -> bool:
         """One targeted, per-entity re-patch attempt (no bulk query — this
         is for a single entity, not a full boot pass). Also attempts the
-        last_triggered path. On failure, schedules retries using the same
-        retry_delays as the boot pass, respecting the same grace window."""
+        last_triggered path. Respects the same grace window as the boot pass.
+
+        Deliberately free of scheduling side effects: it must never arm
+        retries itself. It runs both as the first attempt (from
+        _patch_reregistered) and as *every* retry attempt, so scheduling
+        here would let each failing retry arm a fresh ladder — the number of
+        attempts would then grow by a factor of len(retry_delays) per round
+        instead of being capped at one ladder per re-registration.
+        """
         live = self.hass.states.get(entity_id)
         if live is None or live.state in INVALID_STATES:
             return False
@@ -992,7 +1009,6 @@ class _RestoreJob:
         await self._maybe_restore_last_triggered(entity_id)
         ts = await self._resolve(entity_id, live, None)
         if ts is None:
-            self._schedule_reregister_retries(entity_id, grace)
             return False
         self._apply(live, ts, entity_id)
         _LOGGER.debug("%s: re-patched after runtime re-registration", entity_id)
@@ -1005,18 +1021,45 @@ class _RestoreJob:
 
     @callback
     def _schedule_reregister_retries(self, entity_id: str, grace: float) -> None:
+        """Arm the fixed retry ladder (one timer per retry delay) for one
+        re-registration of one entity.
+
+        Cancels any ladder still armed for this entity first: replacing the
+        dict entry without cancelling would leave the previous timers armed
+        but untracked, so they could neither be cancelled on unload nor
+        counted — the mechanism behind the unbounded retry growth this
+        guards against.
+        """
+        self._cancel_reregister_retry(entity_id)
+        delays = self._retry_delays
+        remaining = len(delays)
+
         def _make(delay: int) -> CALLBACK_TYPE:
             @callback
             def _fire(_now) -> None:
-                self.hass.async_create_task(
-                    self._attempt_reregister_patch(entity_id, grace)
-                )
+                nonlocal remaining
+                remaining -= 1
+                if remaining <= 0:
+                    # Ladder exhausted: drop the (now fully fired) entry so
+                    # the dict tracks live timers only, instead of keeping
+                    # one stale entry per entity that ever failed a re-patch.
+                    self._reregister_retry_timers.pop(entity_id, None)
+                self.hass.async_create_task(self._retry_reregister(entity_id, grace))
 
             return async_call_later(self.hass, delay, _fire)
 
-        self._reregister_retry_timers[entity_id] = [
-            _make(d) for d in self._retry_delays
-        ]
+        self._reregister_retry_timers[entity_id] = [_make(d) for d in delays]
+
+    async def _retry_reregister(self, entity_id: str, grace: float) -> None:
+        """One scheduled retry attempt from the ladder above.
+
+        Cancels the rest of the ladder as soon as an attempt succeeds: a
+        resolved entity then stops issuing recorder queries instead of
+        running its remaining timers out against a state that is already
+        patched (and therefore outside the grace window anyway).
+        """
+        if await self._attempt_reregister_patch(entity_id, grace):
+            self._cancel_reregister_retry(entity_id)
 
     # ----- Incremental runtime store ---------------------------------------
 
