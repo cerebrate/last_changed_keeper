@@ -176,6 +176,37 @@ async def test_reregistration_retry_ladder_does_not_grow_on_repeated_failure(
     assert "light.kitchen" not in job._reregister_retry_timers
 
 
+async def test_no_retry_ladder_when_entity_is_not_a_candidate(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """A retry ladder is only worthwhile for an entity that is a valid
+    candidate but momentarily unresolvable. An entity that has gone
+    unavailable, or is already outside the grace window, is not a candidate
+    at all - retrying it would just burn recorder queries to reach the same
+    early return.
+    """
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    assert await job._attempt_reregister_patch("light.nonexistent", 1800) is None
+    assert "light.nonexistent" not in job._reregister_retry_timers
+
+    hass.states.async_set("light.kitchen", "unavailable")
+    await hass.async_block_till_done()
+    assert await job._attempt_reregister_patch("light.kitchen", 1800) is None
+
+    # Valid candidate, nothing resolvable yet -> retry is worthwhile.
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    assert await job._attempt_reregister_patch("light.kitchen", 1800) is False
+
+    # ...but the attempt itself still never schedules; only the caller does.
+    job._cancel_reregister_retry("light.kitchen")
+    assert await job._attempt_reregister_patch("light.kitchen", 1800) is False
+    assert "light.kitchen" not in job._reregister_retry_timers
+
+
 async def test_successful_retry_cancels_the_rest_of_the_ladder(
     recorder_mock, enable_custom_integrations, hass: HomeAssistant
 ) -> None:

@@ -116,6 +116,13 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.SENSOR]
 
+# Return value of _attempt_reregister_patch meaning "valid candidate, just
+# not resolvable yet" — the only outcome that justifies arming a retry
+# ladder. Spelled as a name rather than a bare False so the three-way
+# result (patched / retry worthwhile / not a candidate) reads explicitly at
+# both the return and the call site.
+_RETRY_WORTHWHILE = False
+
 # Lazily evaluated (PEP 695), so this forward-references _RestoreJob safely.
 type LckConfigEntry = ConfigEntry[_RestoreJob]
 
@@ -1010,12 +1017,14 @@ class _RestoreJob:
         re-registration can only ever produce len(retry_delays) retries.
         """
         self._cancel_reregister_retry(entity_id)
-        if await self._attempt_reregister_patch(entity_id, grace):
-            return True
-        self._schedule_reregister_retries(entity_id, grace)
-        return False
+        result = await self._attempt_reregister_patch(entity_id, grace)
+        if result is _RETRY_WORTHWHILE:
+            self._schedule_reregister_retries(entity_id, grace)
+        return result is True
 
-    async def _attempt_reregister_patch(self, entity_id: str, grace: float) -> bool:
+    async def _attempt_reregister_patch(
+        self, entity_id: str, grace: float
+    ) -> bool | None:
         """One targeted, per-entity re-patch attempt (no bulk query — this
         is for a single entity, not a full boot pass). Also attempts the
         last_triggered path. Respects the same grace window as the boot pass.
@@ -1026,16 +1035,22 @@ class _RestoreJob:
         here would let each failing retry arm a fresh ladder — the number of
         attempts would then grow by a factor of len(retry_delays) per round
         instead of being capped at one ladder per re-registration.
+
+        Returns True when patched, False (_RETRY_WORTHWHILE) when the entity
+        is a valid candidate that simply could not be resolved right now, and
+        None when it is not a candidate at all — gone, unavailable, or
+        already outside the grace window. Only the middle case justifies a
+        retry ladder, which is the distinction the caller acts on.
         """
         live = self.hass.states.get(entity_id)
         if live is None or live.state in INVALID_STATES:
-            return False
+            return None
         if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
-            return False
+            return None
         await self._maybe_restore_last_triggered(entity_id)
         ts = await self._resolve(entity_id, live, None)
         if ts is None:
-            return False
+            return _RETRY_WORTHWHILE
         self._apply(live, ts, entity_id)
         _LOGGER.debug("%s: re-patched after runtime re-registration", entity_id)
         return True
@@ -1084,7 +1099,7 @@ class _RestoreJob:
         running its remaining timers out against a state that is already
         patched (and therefore outside the grace window anyway).
         """
-        if await self._attempt_reregister_patch(entity_id, grace):
+        if await self._attempt_reregister_patch(entity_id, grace) is True:
             self._cancel_reregister_retry(entity_id)
 
     # ----- Incremental runtime store ---------------------------------------
