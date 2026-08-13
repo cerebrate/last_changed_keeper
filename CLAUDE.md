@@ -51,7 +51,13 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    the caller resolves a batch and drops it before the next query runs, so
    peak memory is one batch rather than the whole installation's 30-day
    history. Both the generator and the caller must release their reference —
-   see the `del bulk` in each consumer.
+   see the `del bulk` in each consumer. Because streaming means the pass can
+   itself take a while, the per-batch re-validation compares each entity's
+   `last_changed` against the value snapshotted when the candidate list was
+   built, not against elapsed time vs. `grace` again — an untouched entity's
+   `last_changed` doesn't move just because the pass is slow, so an
+   elapsed-time re-check would silently drop the tail of a slow pass
+   (skipped, and never added to `_pending`, so nothing ever retries them).
 4. Per entity, `_resolve()` picks the real timestamp in this priority order:
    **bulk result → incremental/periodic snapshot store (if newer for the same
    value) → deep per-entity recorder query → best-effort unbounded run**. A

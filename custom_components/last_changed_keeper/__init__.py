@@ -520,8 +520,12 @@ class _RestoreJob:
         self._pending = set()
         self._final_fired = False
 
-        # Candidates: fresh (restart artifact) and currently valid.
+        # Candidates: fresh (restart artifact) and currently valid. Capture
+        # each candidate's last_changed as observed here — the streaming
+        # resolve loop below re-validates against this snapshot rather than
+        # against grace/now a second time (see the comment there for why).
         candidates: list[str] = []
+        candidate_last_changed: dict[str, datetime] = {}
         for entity_id in targets:
             live = self.hass.states.get(entity_id)
             if live is None or live.state in INVALID_STATES:
@@ -530,6 +534,7 @@ class _RestoreJob:
             if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
                 continue  # already really used since boot
             candidates.append(entity_id)
+            candidate_last_changed[entity_id] = live.last_changed
 
         patched = 0
         patched_triggered = 0
@@ -545,11 +550,22 @@ class _RestoreJob:
                 # unavailable or genuinely changed for real — either way the
                 # state captured before the await is stale and must not be
                 # trusted anymore.
+                #
+                # "Genuinely changed" is decided against the last_changed
+                # snapshotted when the candidate list was built, not by
+                # re-checking elapsed time against grace: a streamed pass can
+                # itself run long, and an untouched entity's last_changed
+                # doesn't move just because our own pass is slow — an
+                # elapsed-time re-check would silently drop entities from the
+                # tail of a slow run (skipped here, never added to _pending,
+                # so nothing ever retries them) purely as a function of pass
+                # duration. Comparing last_changed only skips an entity that
+                # actually transitioned since it was listed as a candidate.
                 live = self.hass.states.get(entity_id)
                 if live is None or live.state in INVALID_STATES:
                     self._pending.add(entity_id)
                     continue
-                if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
+                if live.last_changed != candidate_last_changed[entity_id]:
                     continue  # changed for real while we were awaiting the query
                 if await self._maybe_restore_last_triggered(entity_id):
                     patched_triggered += 1
