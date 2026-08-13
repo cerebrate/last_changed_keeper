@@ -539,11 +539,16 @@ class _RestoreJob:
         patched = 0
         patched_triggered = 0
         bulk_entities = 0
+        bulk_rows_fetched = 0
+        bulk_batches = 0
+        counters: dict[str, int] = {}
         # Resolve each batch as it arrives and drop it again, so only one
         # batch of recorder history is resident at a time — see
         # _iter_bulk_batches.
         async for chunk, bulk in self._iter_bulk_batches(candidates):
+            bulk_batches += 1
             bulk_entities += len(bulk)
+            bulk_rows_fetched += sum(len(rows) for rows in bulk.values())
             for entity_id in chunk:
                 # Re-validate: the bulk query above awaited the recorder
                 # executor, during which this entity may have gone
@@ -569,7 +574,7 @@ class _RestoreJob:
                     continue  # changed for real while we were awaiting the query
                 if await self._maybe_restore_last_triggered(entity_id):
                     patched_triggered += 1
-                ts = await self._resolve(entity_id, live, bulk.get(entity_id))
+                ts = await self._resolve(entity_id, live, bulk.get(entity_id), counters)
                 if ts is not None:
                     self._apply(live, ts, entity_id)
                     patched += 1
@@ -585,6 +590,9 @@ class _RestoreJob:
             "targets": len(targets),
             "candidates": len(candidates),
             "bulk_entities": bulk_entities,
+            "bulk_rows_fetched": bulk_rows_fetched,
+            "bulk_batches": bulk_batches,
+            "deep_queries": counters.get("deep_queries", 0),
             "patched_immediate": patched,
             "patched_total": patched,
             "patched_last_triggered": patched_triggered,
@@ -594,8 +602,9 @@ class _RestoreJob:
         }
         _LOGGER.info(
             "Last Changed Keeper: pass 0 — %d patched, %d pending "
-            "(bulk: %d entities)",
-            patched, len(self._pending), bulk_entities,
+            "(bulk: %d entities / %d rows in %d batches, %d deep queries)",
+            patched, len(self._pending), bulk_entities, bulk_rows_fetched,
+            bulk_batches, counters.get("deep_queries", 0),
         )
         # Record boot passes (not service-triggered ones) in the rolling run
         # history — before firing the event, so the final-event update below
@@ -773,6 +782,13 @@ class _RestoreJob:
             return
         mismatches = result.get("mismatches") or []
         self.stats["verify_mismatches"] = len(mismatches)
+        # Prefixed distinctly from the boot pass's own bulk_rows_fetched/
+        # bulk_batches/deep_queries above (this is a second, separate
+        # recorder pass over every target, not just the boot candidates —
+        # see async_verify's docstring).
+        self.stats["verify_bulk_rows_fetched"] = result.get("bulk_rows_fetched", 0)
+        self.stats["verify_bulk_batches"] = result.get("bulk_batches", 0)
+        self.stats["verify_deep_queries"] = result.get("deep_queries", 0)
         if mismatches:
             _LOGGER.warning(
                 "Post-boot verify: %d of %d entities deviate from the "
@@ -792,9 +808,19 @@ class _RestoreJob:
     # ----- Resolving the real timestamp ----------------------------------
 
     async def _resolve(
-        self, entity_id: str, live: State, bulk_states: list | None
+        self,
+        entity_id: str,
+        live: State,
+        bulk_states: list | None,
+        counters: dict[str, int] | None = None,
     ) -> datetime | None:
-        """Determine the real last_changed: bulk → snapshot → deep → best-effort."""
+        """Determine the real last_changed: bulk → snapshot → deep → best-effort.
+
+        counters, when given, is a mutable dict the caller uses to collect
+        pass-wide instrumentation — currently just "deep_queries", the count
+        of entities that fell through to step 3 below. See _async_run_impl
+        and async_verify, the two callers that report it in stats.
+        """
         cutoff = live.last_changed
 
         def _ok(ts: datetime | None) -> bool:
@@ -834,6 +860,8 @@ class _RestoreJob:
                 return snap_dt
 
         # 3. Deep per-entity query
+        if counters is not None:
+            counters["deep_queries"] = counters.get("deep_queries", 0) + 1
         try:
             deep = await get_instance(self.hass).async_add_executor_job(
                 get_last_state_changes, self.hass, HISTORY_DEPTH, entity_id
@@ -1171,7 +1199,15 @@ class _RestoreJob:
             return
         dirty, self._dirty = self._dirty, {}
         self._snapshot.update(dirty)
-        self.hass.async_create_task(self._store.async_save(dict(self._snapshot)))
+        # async_delay_save (not async_create_task(self._store.async_save(...))):
+        # lets Store coalesce flushes that land close together into one
+        # write instead of spawning an untracked save task per flush — the
+        # same pattern _persist_run_stats already uses for _runs_store.
+        # INCREMENTAL_DEBOUNCE_SECONDS is reused as the delay since it's
+        # already the calibrated window for this store.
+        self._store.async_delay_save(
+            lambda: dict(self._snapshot), INCREMENTAL_DEBOUNCE_SECONDS
+        )
         _LOGGER.debug("Incremental store: merged %d entities", len(dirty))
 
     # ----- Verify (diagnostic only, never patches) --------------------------
@@ -1186,18 +1222,28 @@ class _RestoreJob:
         Unlike the boot pass this checks every target, not just the fresh
         candidates, so it is the heaviest recorder consumer in the
         integration — it is streamed batch by batch for the same reason (see
-        _iter_bulk_batches), and only the mismatch list is accumulated.
+        _iter_bulk_batches), and only the mismatch list is accumulated. The
+        returned bulk_rows_fetched/bulk_batches/deep_queries counts exist so
+        that weight is visible from the service response (and the log line
+        below) rather than only inferable from how long the call took.
         """
         domains, entities, exclude, _, labels, areas = self._config
         entity_ids = sorted(self._targets(domains, entities, exclude, labels, areas))
 
         mismatches: list[dict[str, Any]] = []
+        bulk_rows_fetched = 0
+        bulk_batches = 0
+        counters: dict[str, int] = {}
         async for chunk, bulk in self._iter_bulk_batches(entity_ids):
+            bulk_batches += 1
+            bulk_rows_fetched += sum(len(rows) for rows in bulk.values())
             for entity_id in chunk:
                 live = self.hass.states.get(entity_id)
                 if live is None or live.state in INVALID_STATES:
                     continue
-                expected = await self._resolve(entity_id, live, bulk.get(entity_id))
+                expected = await self._resolve(
+                    entity_id, live, bulk.get(entity_id), counters
+                )
                 if expected is None:
                     continue
                 diff = (live.last_changed - expected).total_seconds()
@@ -1211,7 +1257,19 @@ class _RestoreJob:
                         }
                     )
             del bulk  # released before the next batch is fetched
-        return {"checked": len(entity_ids), "mismatches": mismatches}
+        _LOGGER.info(
+            "Last Changed Keeper: verify — %d checked, %d mismatches "
+            "(bulk: %d rows in %d batches, %d deep queries)",
+            len(entity_ids), len(mismatches), bulk_rows_fetched, bulk_batches,
+            counters.get("deep_queries", 0),
+        )
+        return {
+            "checked": len(entity_ids),
+            "mismatches": mismatches,
+            "bulk_rows_fetched": bulk_rows_fetched,
+            "bulk_batches": bulk_batches,
+            "deep_queries": counters.get("deep_queries", 0),
+        }
 
 
 def resolve_targets(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import weakref
+from dataclasses import dataclass
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
@@ -27,6 +28,52 @@ def _make_job(hass: HomeAssistant) -> _RestoreJob:
     entry = MockConfigEntry(domain=DOMAIN, data={})
     store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     return _RestoreJob(hass, entry, store, {})
+
+
+@dataclass
+class FakeRow:
+    state: str
+    last_changed: object
+    last_updated: object
+
+
+async def test_boot_pass_reports_bulk_and_deep_query_instrumentation(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, monkeypatch
+) -> None:
+    """stats after a boot pass expose bulk_rows_fetched/bulk_batches/
+    deep_queries so the recorder cost of a pass is visible without having
+    to infer it from wall-clock duration alone - see also the equivalent
+    verify coverage in test_verify_service.py."""
+    hass.states.async_set("light.bulk_hit", "on")
+    hass.states.async_set("light.falls_through", "on")
+    await hass.async_block_till_done()
+
+    now = hass.states.get("light.bulk_hit").last_changed
+    two_rows = [
+        FakeRow("off", now - timedelta(hours=1), now - timedelta(hours=1)),
+        FakeRow("on", now - timedelta(minutes=10), now - timedelta(minutes=10)),
+    ]
+
+    def fake_bulk_query(_hass, _start, entity_ids):
+        return {"light.bulk_hit": two_rows} if "light.bulk_hit" in entity_ids else {}
+
+    monkeypatch.setattr(lck, "_bulk_query", fake_bulk_query)
+    monkeypatch.setattr(lck, "BULK_BATCH_SIZE", 1)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_ALL_ENTITIES: False, CONF_DOMAINS: ["light"], CONF_ENTITIES: []},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    stats = entry.runtime_data.stats
+    # light.bulk_hit resolves from its bounded bulk result (2 rows, no deep
+    # query needed); light.falls_through has none, so it falls through.
+    assert stats["bulk_rows_fetched"] == 2
+    assert stats["bulk_batches"] == 2  # one per entity at batch size 1
+    assert stats["deep_queries"] == 1
 
 
 async def test_bulk_batches_split_by_batch_size(
