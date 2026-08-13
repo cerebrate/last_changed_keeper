@@ -99,7 +99,10 @@ part of the selection), and the **retry delays**. Change it anytime via
   Compares the live `last_changed` of every currently watched entity against
   the value derived from the recorder/store and returns any mismatches
   (`entity_id`, `live_last_changed`, `expected_last_changed`,
-  `diff_seconds`). See [Troubleshooting](#troubleshooting).
+  `diff_seconds`), plus `bulk_rows_fetched`/`bulk_batches`/`deep_queries` —
+  how much recorder history the check actually processed, since `verify`
+  scans every watched entity rather than just the fresh boot candidates.
+  See [Troubleshooting](#troubleshooting).
 - Event `last_changed_keeper_restored` fires once a pass settles (`final:
   true` in the event data) — useful for automations that would otherwise
   race the restore pass right after boot.
@@ -123,9 +126,11 @@ part of the selection), and the **retry delays**. Change it anytime via
 ## How data is refreshed
 
 There is no polling: everything is event- and query-driven. A **bulk**
-recorder query runs once at boot for every candidate; late-recovering
-entities are caught by a **state-change listener** plus a few **delayed
-retries** (default +30/90/180 s). After boot, two lightweight listeners keep
+recorder query covers every candidate at boot, split into batches and
+streamed one at a time so a large installation's history is never all held
+in memory at once; late-recovering entities are caught by a **state-change
+listener** plus a few **delayed retries** (default +30/90/180 s). After
+boot, two lightweight listeners keep
 running for the entry's lifetime: one **re-patches an entity that gets fully
 re-registered at runtime** (see [How it works](#how-it-works)), and one
 **debounces genuine value changes into the snapshot store** so it stays
@@ -181,6 +186,15 @@ data: {}
 - **Nothing happens at all.** Confirm the [`recorder`](https://www.home-assistant.io/integrations/recorder/)
   integration is enabled (see limitations below) and check the Home
   Assistant log for `last_changed_keeper` entries.
+- **A pass seems slow, or memory usage is higher than expected.** The status
+  sensor's attributes (or a diagnostics download) include
+  `bulk_rows_fetched`, `bulk_batches`, and `deep_queries` for the last boot
+  pass, and `verify_bulk_rows_fetched`/`verify_bulk_batches`/
+  `verify_deep_queries` for the optional post-boot self-check — how much
+  recorder history was actually processed, and how many entities needed the
+  costlier per-entity fallback query. A large `deep_queries` count usually
+  means many watched entities have no recent history within the 30-day bulk
+  window (see the lookback limitation below).
 
 ## Known limitations
 

@@ -154,3 +154,47 @@ async def test_deep_query_best_effort_used_when_window_not_exhausted(
     job = _make_job(hass)
     result = await job._resolve("light.kitchen", live, None)
     assert result == oldest
+
+
+async def test_counters_track_deep_queries_only_when_step_3_runs(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """The optional counters dict (see _async_run_impl/async_verify, which
+    report it in stats) must count an entity only when _resolve actually
+    falls through to the deep per-entity query - not on a bulk/snapshot
+    short-circuit, which is the case the counter exists to distinguish
+    from ('how many entities needed the expensive fallback')."""
+    monkeypatch.setattr(
+        lck, "get_last_state_changes", lambda *a, **k: {a[-1]: []}
+    )
+
+    hass.states.async_set("light.bulk_hit", "on")
+    hass.states.async_set("light.snapshot_hit", "on")
+    hass.states.async_set("light.falls_through", "on")
+    await hass.async_block_till_done()
+
+    stale = dt_util.utcnow() - timedelta(days=3)
+    job = _make_job(
+        hass, snapshot={"light.snapshot_hit": {"s": "on", "t": stale.isoformat()}}
+    )
+
+    bulk_live = hass.states.get("light.bulk_hit")
+    now = bulk_live.last_changed
+    bulk_states = [
+        FakeRow("off", now - timedelta(hours=1), now - timedelta(hours=1)),
+        FakeRow("on", now - timedelta(minutes=10), now - timedelta(minutes=10)),
+    ]
+
+    counters: dict[str, int] = {}
+    await job._resolve("light.bulk_hit", bulk_live, bulk_states, counters)
+    assert counters.get("deep_queries", 0) == 0  # bounded bulk result short-circuits
+
+    await job._resolve(
+        "light.snapshot_hit", hass.states.get("light.snapshot_hit"), None, counters
+    )
+    assert counters.get("deep_queries", 0) == 0  # snapshot match short-circuits
+
+    await job._resolve(
+        "light.falls_through", hass.states.get("light.falls_through"), None, counters
+    )
+    assert counters.get("deep_queries", 0) == 1  # neither available -> step 3 ran
