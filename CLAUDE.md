@@ -58,6 +58,12 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    `last_changed` doesn't move just because the pass is slow, so an
    elapsed-time re-check would silently drop the tail of a slow pass
    (skipped, and never added to `_pending`, so nothing ever retries them).
+   `stats["bulk_rows_fetched"]`/`["bulk_batches"]`/`["deep_queries"]` (also
+   returned by `async_verify`, prefixed `verify_*` in the persisted
+   post-boot self-check) expose the recorder cost of a pass — how many
+   rows it fetched and how many entities fell through to the expensive
+   per-entity query — via the status sensor/diagnostics, instead of that
+   only being inferable from wall-clock duration.
 4. Per entity, `_resolve()` picks the real timestamp in this priority order:
    **bulk result → incremental/periodic snapshot store (if newer for the same
    value) → deep per-entity recorder query → best-effort unbounded run**. A
@@ -111,3 +117,15 @@ the reasoning behind each source's priority and the "bounded vs. best-effort"
 distinction — it's not obvious from the code alone and getting the order
 wrong risks silently backdating an entity's *new* value using its *old*
 timestamp.
+
+`tests/test_resolve_equivalence.py` is the one place in the suite that
+exercises a real recorder round trip (genuine historical rows written via
+`freeze_time`, fetched by an unmocked `_bulk_query`) rather than synthetic
+`FakeRow` history handed to `_resolve` directly — everything else in the
+suite tests the pure decision logic. It pins final resolved timestamps at a
+few canonical real distances into the past (inside the bulk window, beyond
+it, a restart-recovery pattern, within the margin), so it's the regression
+net for any change to *how* history is fetched (e.g. querying a short
+window first and escalating only for entities still unbounded) — those
+tests should keep passing unchanged across such a change, since they assert
+on outcomes rather than on the fetch strategy itself.
