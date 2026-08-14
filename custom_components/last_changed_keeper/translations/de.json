@@ -16,7 +16,8 @@
           "restore_last_updated": "Auch last_updated wiederherstellen",
           "restore_last_triggered": "Auch last_triggered von Automatisierungen/Skripten wiederherstellen",
           "verify_after_boot": "Selbsttest wenige Minuten nach dem Start (loggt Abweichungen)",
-          "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)"
+          "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)",
+          "bulk_batch_size": "Batchgröße für die Sammel-Verlaufsabfrage (Entities pro Abfrage)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Auch last_updated wiederherstellen",
           "restore_last_triggered": "Auch last_triggered von Automatisierungen/Skripten wiederherstellen",
           "verify_after_boot": "Selbsttest wenige Minuten nach dem Start (loggt Abweichungen)",
-          "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)"
+          "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)",
+          "bulk_batch_size": "Batchgröße für die Sammel-Verlaufsabfrage (Entities pro Abfrage)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Auch last_updated wiederherstellen",
           "restore_last_triggered": "Auch last_triggered von Automatisierungen/Skripten wiederherstellen",
           "verify_after_boot": "Selbsttest wenige Minuten nach dem Start (loggt Abweichungen)",
-          "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)"
+          "retry_delays": "Wiederholungs-Verzögerungen in Sekunden (kommagetrennt)",
+          "bulk_batch_size": "Batchgröße für die Sammel-Verlaufsabfrage (Entities pro Abfrage)"
         }
       }
     },

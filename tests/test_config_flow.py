@@ -338,7 +338,7 @@ def test_build_schema_includes_labels_areas_and_snapshot_interval(
 ) -> None:
     schema = _build_schema(hass, {})
     field_names = {str(key) for key in schema.schema}
-    assert {"labels", "areas", "snapshot_interval"} <= field_names
+    assert {"labels", "areas", "snapshot_interval", "bulk_batch_size"} <= field_names
 
 
 def test_build_schema_includes_restore_last_triggered_default_on(

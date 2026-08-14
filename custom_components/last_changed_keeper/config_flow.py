@@ -15,8 +15,10 @@ from homeassistant.helpers import selector
 
 from . import resolve_targets
 from .const import (
+    BULK_BATCH_SIZE,
     CONF_ALL_ENTITIES,
     CONF_AREAS,
+    CONF_BULK_BATCH_SIZE,
     CONF_DOMAINS,
     CONF_ENTITIES,
     CONF_EXCLUDE,
@@ -125,6 +127,15 @@ def _build_schema(hass: HomeAssistant, defaults: dict[str, Any]) -> vol.Schema:
                     CONF_RETRY_DELAYS, _DEFAULT_RETRY_DELAYS_STR
                 ),
             ): selector.TextSelector(),
+            vol.Optional(
+                CONF_BULK_BATCH_SIZE,
+                default=defaults.get(CONF_BULK_BATCH_SIZE, BULK_BATCH_SIZE),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=25, max=2000, step=25,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
         }
     )
 

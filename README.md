@@ -88,8 +88,9 @@ selectors), an optional **exclude** list, the **grace** window, an optional
 shutdown — hedges against crashes/power loss), an optional **restore
 `last_updated`** toggle, a **restore automation/script `last_triggered`**
 toggle (default: on — only matters if `automation`/`script` entities are
-part of the selection), and the **retry delays**. Change it anytime via
-*Configure*/*Reconfigure*.
+part of the selection), the **retry delays**, and the **bulk-query batch
+size** (default 500 — lower it on very large installs if the bulk pass uses
+too much memory). Change it anytime via *Configure*/*Reconfigure*.
 
 ## Services & events
 

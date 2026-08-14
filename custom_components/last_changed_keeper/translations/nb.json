@@ -16,7 +16,8 @@
           "restore_last_updated": "Gjenopprett også last_updated",
           "restore_last_triggered": "Gjenopprett også last_triggered for automatiseringer/skript",
           "verify_after_boot": "Selvtest noen minutter etter oppstart (logger avvik)",
-          "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)"
+          "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)",
+          "bulk_batch_size": "Batchstørrelse for masse-historikkspørring (enheter per spørring)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Gjenopprett også last_updated",
           "restore_last_triggered": "Gjenopprett også last_triggered for automatiseringer/skript",
           "verify_after_boot": "Selvtest noen minutter etter oppstart (logger avvik)",
-          "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)"
+          "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)",
+          "bulk_batch_size": "Batchstørrelse for masse-historikkspørring (enheter per spørring)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Gjenopprett også last_updated",
           "restore_last_triggered": "Gjenopprett også last_triggered for automatiseringer/skript",
           "verify_after_boot": "Selvtest noen minutter etter oppstart (logger avvik)",
-          "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)"
+          "retry_delays": "Forsinkelser for nytt forsøk i sekunder (kommaseparert)",
+          "bulk_batch_size": "Batchstørrelse for masse-historikkspørring (enheter per spørring)"
         }
       }
     },

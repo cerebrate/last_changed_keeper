@@ -13,6 +13,7 @@ CONF_RESTORE_LAST_UPDATED = "restore_last_updated"
 CONF_RETRY_DELAYS = "retry_delays"
 CONF_RESTORE_LAST_TRIGGERED = "restore_last_triggered"
 CONF_VERIFY_AFTER_BOOT = "verify_after_boot"
+CONF_BULK_BATCH_SIZE = "bulk_batch_size"
 
 DEFAULT_RESTORE_LAST_UPDATED = False
 DEFAULT_RESTORE_LAST_TRIGGERED = True
@@ -93,7 +94,10 @@ BULK_WINDOW_DAYS = 30
 
 # With "track all entities" the candidate list can be thousands of entities;
 # one recorder query with an IN(...) list that long gets slow and
-# memory-hungry. Split into chunks of this size instead.
+# memory-hungry. Split into chunks of this size instead. Configurable
+# (CONF_BULK_BATCH_SIZE) since the merged result set is held in memory for
+# the whole resolve pass, so very large installs may need a smaller value
+# to avoid excessive peak memory (see GitHub issue: OOMs on 3000+ entities).
 BULK_BATCH_SIZE = 500
 
 # States that are not real usage (mainly restart artifacts).

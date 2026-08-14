@@ -2,6 +2,17 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.1] — 2026-08-14
+### Added
+- **Configurable bulk-query batch size.** The 500-entities-per-query batch
+  size introduced in 0.9.0 is now a setup/reconfigure/options field
+  (default unchanged at 500). Installs with very large tracked-entity
+  counts that still see high memory use during the bulk pass can lower it;
+  the merged result of a batch is still held for the whole resolve pass, so
+  this is a mitigation, not a fix, for the underlying memory-growth issue —
+  see GitHub issue #1 for the ongoing investigation of a proper streaming
+  fix.
+
 ## [0.9.0] — 2026-08-05
 ### Added
 - **Status sensor.** A diagnostic sensor ("Restored entities") whose state is

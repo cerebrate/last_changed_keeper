@@ -75,6 +75,7 @@ from .const import (
     BULK_WINDOW_DAYS,
     CONF_ALL_ENTITIES,
     CONF_AREAS,
+    CONF_BULK_BATCH_SIZE,
     CONF_DOMAINS,
     CONF_ENTITIES,
     CONF_EXCLUDE,
@@ -362,6 +363,15 @@ class _RestoreJob:
             return float(data.get(CONF_SNAPSHOT_INTERVAL, DEFAULT_SNAPSHOT_INTERVAL))
         except (TypeError, ValueError):
             return DEFAULT_SNAPSHOT_INTERVAL
+
+    @property
+    def _bulk_batch_size(self) -> int:
+        data = {**self.entry.data, **self.entry.options}
+        try:
+            value = int(data.get(CONF_BULK_BATCH_SIZE, BULK_BATCH_SIZE))
+        except (TypeError, ValueError):
+            return BULK_BATCH_SIZE
+        return value if value > 0 else BULK_BATCH_SIZE
 
     def _targets(
         self,
@@ -849,9 +859,10 @@ class _RestoreJob:
         long gets slow and memory-hungry. A failed batch only loses its own
         entities (they fall back to snapshot/per-entity queries)."""
         start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
+        batch_size = self._bulk_batch_size
         out: dict[str, list] = {}
-        for i in range(0, len(entity_ids), BULK_BATCH_SIZE):
-            chunk = entity_ids[i : i + BULK_BATCH_SIZE]
+        for i in range(0, len(entity_ids), batch_size):
+            chunk = entity_ids[i : i + batch_size]
             try:
                 out.update(
                     await get_instance(self.hass).async_add_executor_job(
@@ -861,7 +872,7 @@ class _RestoreJob:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "Bulk recorder query failed (batch %d, %d entities): %s",
-                    i // BULK_BATCH_SIZE, len(chunk), err,
+                    i // batch_size, len(chunk), err,
                 )
         return out
 

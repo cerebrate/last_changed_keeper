@@ -16,7 +16,8 @@
           "restore_last_updated": "Återställ även last_updated",
           "restore_last_triggered": "Återställ även last_triggered för automatiseringar/skript",
           "verify_after_boot": "Självtest några minuter efter uppstart (loggar avvikelser)",
-          "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)"
+          "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)",
+          "bulk_batch_size": "Batchstorlek för bulk-historikfrågan (entiteter per fråga)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Återställ även last_updated",
           "restore_last_triggered": "Återställ även last_triggered för automatiseringar/skript",
           "verify_after_boot": "Självtest några minuter efter uppstart (loggar avvikelser)",
-          "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)"
+          "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)",
+          "bulk_batch_size": "Batchstorlek för bulk-historikfrågan (entiteter per fråga)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Återställ även last_updated",
           "restore_last_triggered": "Återställ även last_triggered för automatiseringar/skript",
           "verify_after_boot": "Självtest några minuter efter uppstart (loggar avvikelser)",
-          "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)"
+          "retry_delays": "Fördröjningar för nya försök i sekunder (kommaseparerade)",
+          "bulk_batch_size": "Batchstorlek för bulk-historikfrågan (entiteter per fråga)"
         }
       }
     },
