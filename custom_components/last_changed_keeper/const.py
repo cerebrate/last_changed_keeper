@@ -94,11 +94,17 @@ BULK_WINDOW_DAYS = 30
 
 # With "track all entities" the candidate list can be thousands of entities;
 # one recorder query with an IN(...) list that long gets slow and
-# memory-hungry. Split into chunks of this size instead. Configurable
-# (CONF_BULK_BATCH_SIZE) since the merged result set is held in memory for
-# the whole resolve pass, so very large installs may need a smaller value
-# to avoid excessive peak memory (see GitHub issue: OOMs on 3000+ entities).
-BULK_BATCH_SIZE = 500
+# memory-hungry. Split into chunks of this size instead, streamed one batch
+# at a time (see _iter_bulk_batches) so only one batch of history is
+# resident at once instead of the whole installation's — this is therefore
+# the peak-memory knob, configurable per entry via CONF_BULK_BATCH_SIZE. The
+# window is BULK_WINDOW_DAYS wide and rows come back as full state objects,
+# so chatty entities (power meters, frequently-polled sensors) can each
+# contribute many thousands of rows; keep this well below the entity count
+# of a large installation. The cost of a smaller value is only more
+# round-trips, which the recorder handles far better than a large resident
+# result set (see GitHub issue: OOMs on 3000+ entities).
+BULK_BATCH_SIZE = 250
 
 # States that are not real usage (mainly restart artifacts).
 INVALID_STATES = ("unavailable", "unknown")

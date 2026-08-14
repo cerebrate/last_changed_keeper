@@ -67,6 +67,14 @@ async def test_incremental_change_merges_into_store_after_debounce(
     )
     await hass.async_block_till_done()
 
+    # _flush_dirty ran, but the actual write is itself now delayed via
+    # Store.async_delay_save (see _flush_dirty) - a second advance is needed
+    # before it lands in storage.
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=INCREMENTAL_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
     assert hass_storage[STORAGE_KEY]["data"]["light.kitchen"]["s"] == "on"
 
 
@@ -157,6 +165,14 @@ async def test_flush_dirty_writes_and_clears_pending(
     await hass.async_block_till_done()
 
     assert job._dirty == {}
+    # The write itself is delayed via Store.async_delay_save (see
+    # _flush_dirty), so it isn't in storage until that delay elapses.
+    assert "light.kitchen" not in hass_storage.get(STORAGE_KEY, {}).get("data", {})
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=INCREMENTAL_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
     assert hass_storage[STORAGE_KEY]["data"]["light.kitchen"]["s"] == "on"
 
 
@@ -182,6 +198,13 @@ async def test_on_target_state_changed_forces_flush_after_max_wait(
 
     assert job._dirty == {}  # already flushed, not left sitting around
     assert job._flush_timer is None
+    # The write itself is delayed via Store.async_delay_save (see
+    # _flush_dirty), so it isn't in storage until that delay elapses.
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=INCREMENTAL_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
     assert hass_storage[STORAGE_KEY]["data"]["light.kitchen"]["s"] == "on"
 
 
