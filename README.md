@@ -88,7 +88,10 @@ selectors), an optional **exclude** list, the **grace** window, an optional
 shutdown — hedges against crashes/power loss), an optional **restore
 `last_updated`** toggle, a **restore automation/script `last_triggered`**
 toggle (default: on — only matters if `automation`/`script` entities are
-part of the selection), and the **retry delays**. Change it anytime via
+part of the selection), the **retry delays**, and the **bulk-query batch
+size** (default 250 — the bulk pass is streamed one batch at a time, so
+this is also the peak-memory knob; lower it further on very large installs
+if the pass still uses too much memory). Change it anytime via
 *Configure*/*Reconfigure*.
 
 ## Services & events
@@ -194,7 +197,9 @@ data: {}
   recorder history was actually processed, and how many entities needed the
   costlier per-entity fallback query. A large `deep_queries` count usually
   means many watched entities have no recent history within the 30-day bulk
-  window (see the lookback limitation below).
+  window (see the lookback limitation below). If memory is still tight on a
+  very large install, lower the **bulk-query batch size** in
+  *Configure*/*Reconfigure* below its default of 250.
 
 ## Known limitations
 

@@ -16,7 +16,8 @@
           "restore_last_updated": "Gendan også last_updated",
           "restore_last_triggered": "Gendan også last_triggered for automatiseringer/scripts",
           "verify_after_boot": "Selvtest få minutter efter opstart (logger afvigelser)",
-          "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)"
+          "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)",
+          "bulk_batch_size": "Batchstørrelse for bulk-historikforespørgsel (enheder pr. forespørgsel)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Gendan også last_updated",
           "restore_last_triggered": "Gendan også last_triggered for automatiseringer/scripts",
           "verify_after_boot": "Selvtest få minutter efter opstart (logger afvigelser)",
-          "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)"
+          "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)",
+          "bulk_batch_size": "Batchstørrelse for bulk-historikforespørgsel (enheder pr. forespørgsel)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Gendan også last_updated",
           "restore_last_triggered": "Gendan også last_triggered for automatiseringer/scripts",
           "verify_after_boot": "Selvtest få minutter efter opstart (logger afvigelser)",
-          "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)"
+          "retry_delays": "Forsinkelser for nyt forsøg i sekunder (kommasepareret)",
+          "bulk_batch_size": "Batchstørrelse for bulk-historikforespørgsel (enheder pr. forespørgsel)"
         }
       }
     },

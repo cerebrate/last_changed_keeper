@@ -16,7 +16,8 @@
           "restore_last_updated": "Restaurer aussi last_updated",
           "restore_last_triggered": "Restaurer aussi last_triggered des automatisations/scripts",
           "verify_after_boot": "Auto-vérification quelques minutes après le démarrage (journalise les écarts)",
-          "retry_delays": "Délais de relance en secondes (séparés par des virgules)"
+          "retry_delays": "Délais de relance en secondes (séparés par des virgules)",
+          "bulk_batch_size": "Taille de lot pour la requête d'historique groupée (entités par requête)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Restaurer aussi last_updated",
           "restore_last_triggered": "Restaurer aussi last_triggered des automatisations/scripts",
           "verify_after_boot": "Auto-vérification quelques minutes après le démarrage (journalise les écarts)",
-          "retry_delays": "Délais de relance en secondes (séparés par des virgules)"
+          "retry_delays": "Délais de relance en secondes (séparés par des virgules)",
+          "bulk_batch_size": "Taille de lot pour la requête d'historique groupée (entités par requête)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Restaurer aussi last_updated",
           "restore_last_triggered": "Restaurer aussi last_triggered des automatisations/scripts",
           "verify_after_boot": "Auto-vérification quelques minutes après le démarrage (journalise les écarts)",
-          "retry_delays": "Délais de relance en secondes (séparés par des virgules)"
+          "retry_delays": "Délais de relance en secondes (séparés par des virgules)",
+          "bulk_batch_size": "Taille de lot pour la requête d'historique groupée (entités par requête)"
         }
       }
     },

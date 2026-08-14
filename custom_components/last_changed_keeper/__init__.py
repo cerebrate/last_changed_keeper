@@ -76,6 +76,7 @@ from .const import (
     BULK_WINDOW_DAYS,
     CONF_ALL_ENTITIES,
     CONF_AREAS,
+    CONF_BULK_BATCH_SIZE,
     CONF_DOMAINS,
     CONF_ENTITIES,
     CONF_EXCLUDE,
@@ -370,6 +371,15 @@ class _RestoreJob:
             return float(data.get(CONF_SNAPSHOT_INTERVAL, DEFAULT_SNAPSHOT_INTERVAL))
         except (TypeError, ValueError):
             return DEFAULT_SNAPSHOT_INTERVAL
+
+    @property
+    def _bulk_batch_size(self) -> int:
+        data = {**self.entry.data, **self.entry.options}
+        try:
+            value = int(data.get(CONF_BULK_BATCH_SIZE, BULK_BATCH_SIZE))
+        except (TypeError, ValueError):
+            return BULK_BATCH_SIZE
+        return value if value > 0 else BULK_BATCH_SIZE
 
     def _targets(
         self,
@@ -905,9 +915,10 @@ class _RestoreJob:
     ) -> AsyncIterator[tuple[list[str], dict[str, list]]]:
         """Yield recorder history for the bulk window one batch at a time.
 
-        Split into batches of BULK_BATCH_SIZE because with "track all
-        entities" the candidate list can be thousands of entities, and a
-        single IN(...) query that long gets slow and memory-hungry.
+        Split into batches of the configured bulk batch size (see
+        _bulk_batch_size) because with "track all entities" the candidate
+        list can be thousands of entities, and a single IN(...) query that
+        long gets slow and memory-hungry.
 
         Yielding per batch rather than returning one merged dict is what
         bounds peak memory. The window is BULK_WINDOW_DAYS wide and the rows
@@ -927,8 +938,9 @@ class _RestoreJob:
         `_resolve` exactly as before instead of being skipped.
         """
         start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
-        for i in range(0, len(entity_ids), BULK_BATCH_SIZE):
-            chunk = entity_ids[i : i + BULK_BATCH_SIZE]
+        batch_size = self._bulk_batch_size
+        for i in range(0, len(entity_ids), batch_size):
+            chunk = entity_ids[i : i + batch_size]
             try:
                 result = await get_instance(self.hass).async_add_executor_job(
                     _bulk_query, self.hass, start, chunk
@@ -936,7 +948,7 @@ class _RestoreJob:
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "Bulk recorder query failed (batch %d, %d entities): %s",
-                    i // BULK_BATCH_SIZE, len(chunk), err,
+                    i // batch_size, len(chunk), err,
                 )
                 result = {}
             yield chunk, result

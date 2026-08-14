@@ -16,7 +16,8 @@
           "restore_last_updated": "Restaurar também last_updated",
           "restore_last_triggered": "Restaurar também last_triggered de automações/scripts",
           "verify_after_boot": "Autoverificação alguns minutos após o arranque (regista desvios)",
-          "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)"
+          "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)",
+          "bulk_batch_size": "Tamanho do lote da consulta de histórico em massa (entidades por consulta)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Restaurar também last_updated",
           "restore_last_triggered": "Restaurar também last_triggered de automações/scripts",
           "verify_after_boot": "Autoverificação alguns minutos após o arranque (regista desvios)",
-          "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)"
+          "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)",
+          "bulk_batch_size": "Tamanho do lote da consulta de histórico em massa (entidades por consulta)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Restaurar também last_updated",
           "restore_last_triggered": "Restaurar também last_triggered de automações/scripts",
           "verify_after_boot": "Autoverificação alguns minutos após o arranque (regista desvios)",
-          "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)"
+          "retry_delays": "Atrasos de repetição em segundos (separados por vírgulas)",
+          "bulk_batch_size": "Tamanho do lote da consulta de histórico em massa (entidades por consulta)"
         }
       }
     },
