@@ -46,8 +46,10 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
 2. Split into candidates (state is fresh/a restart artifact, within `grace`)
    vs. skip (already genuinely used since boot).
 3. Recorder history for all candidates, fetched in chunks of
-   `BULK_BATCH_SIZE` to avoid a huge `IN (...)` and **streamed** one batch at
-   a time (`_iter_bulk_batches`). Steps 3 and 4 are interleaved per batch:
+   `_bulk_batch_size` (per-entry override of the `BULK_BATCH_SIZE` default,
+   `CONF_BULK_BATCH_SIZE` in the config/options flow) to avoid a huge
+   `IN (...)` and **streamed** one batch at a time (`_iter_bulk_batches`).
+   Steps 3 and 4 are interleaved per batch:
    the caller resolves a batch and drops it before the next query runs, so
    peak memory is one batch rather than the whole installation's 30-day
    history. Both the generator and the caller must release their reference —
