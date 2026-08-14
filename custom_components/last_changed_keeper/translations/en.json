@@ -16,7 +16,8 @@
           "restore_last_updated": "Also restore last_updated",
           "restore_last_triggered": "Also restore automation/script last_triggered",
           "verify_after_boot": "Self-check a few minutes after boot (logs mismatches)",
-          "retry_delays": "Retry delays in seconds (comma-separated)"
+          "retry_delays": "Retry delays in seconds (comma-separated)",
+          "bulk_batch_size": "Bulk history query batch size (entities per query)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Also restore last_updated",
           "restore_last_triggered": "Also restore automation/script last_triggered",
           "verify_after_boot": "Self-check a few minutes after boot (logs mismatches)",
-          "retry_delays": "Retry delays in seconds (comma-separated)"
+          "retry_delays": "Retry delays in seconds (comma-separated)",
+          "bulk_batch_size": "Bulk history query batch size (entities per query)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Also restore last_updated",
           "restore_last_triggered": "Also restore automation/script last_triggered",
           "verify_after_boot": "Self-check a few minutes after boot (logs mismatches)",
-          "retry_delays": "Retry delays in seconds (comma-separated)"
+          "retry_delays": "Retry delays in seconds (comma-separated)",
+          "bulk_batch_size": "Bulk history query batch size (entities per query)"
         }
       }
     },

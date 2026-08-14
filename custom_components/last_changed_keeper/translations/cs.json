@@ -16,7 +16,8 @@
           "restore_last_updated": "Obnovit také last_updated",
           "restore_last_triggered": "Obnovit také last_triggered automatizací/skriptů",
           "verify_after_boot": "Automatická kontrola pár minut po startu (zapíše odchylky do logu)",
-          "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)"
+          "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)",
+          "bulk_batch_size": "Velikost dávky hromadného dotazu historie (entit na dotaz)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Obnovit také last_updated",
           "restore_last_triggered": "Obnovit také last_triggered automatizací/skriptů",
           "verify_after_boot": "Automatická kontrola pár minut po startu (zapíše odchylky do logu)",
-          "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)"
+          "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)",
+          "bulk_batch_size": "Velikost dávky hromadného dotazu historie (entit na dotaz)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Obnovit také last_updated",
           "restore_last_triggered": "Obnovit také last_triggered automatizací/skriptů",
           "verify_after_boot": "Automatická kontrola pár minut po startu (zapíše odchylky do logu)",
-          "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)"
+          "retry_delays": "Prodlevy opakování ve vteřinách (oddělené čárkami)",
+          "bulk_batch_size": "Velikost dávky hromadného dotazu historie (entit na dotaz)"
         }
       }
     },

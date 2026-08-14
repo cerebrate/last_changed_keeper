@@ -16,7 +16,8 @@
           "restore_last_updated": "Ripristina anche last_updated",
           "restore_last_triggered": "Ripristina anche last_triggered di automazioni/script",
           "verify_after_boot": "Auto-verifica pochi minuti dopo l'avvio (registra le discrepanze)",
-          "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)"
+          "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)",
+          "bulk_batch_size": "Dimensione batch per la query cronologica in blocco (entità per query)"
         }
       },
       "reconfigure": {
@@ -34,7 +35,8 @@
           "restore_last_updated": "Ripristina anche last_updated",
           "restore_last_triggered": "Ripristina anche last_triggered di automazioni/script",
           "verify_after_boot": "Auto-verifica pochi minuti dopo l'avvio (registra le discrepanze)",
-          "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)"
+          "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)",
+          "bulk_batch_size": "Dimensione batch per la query cronologica in blocco (entità per query)"
         }
       }
     },
@@ -65,7 +67,8 @@
           "restore_last_updated": "Ripristina anche last_updated",
           "restore_last_triggered": "Ripristina anche last_triggered di automazioni/script",
           "verify_after_boot": "Auto-verifica pochi minuti dopo l'avvio (registra le discrepanze)",
-          "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)"
+          "retry_delays": "Ritardi di ripetizione in secondi (separati da virgole)",
+          "bulk_batch_size": "Dimensione batch per la query cronologica in blocco (entità per query)"
         }
       }
     },

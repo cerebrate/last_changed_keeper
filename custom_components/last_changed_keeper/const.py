@@ -13,6 +13,7 @@ CONF_RESTORE_LAST_UPDATED = "restore_last_updated"
 CONF_RETRY_DELAYS = "retry_delays"
 CONF_RESTORE_LAST_TRIGGERED = "restore_last_triggered"
 CONF_VERIFY_AFTER_BOOT = "verify_after_boot"
+CONF_BULK_BATCH_SIZE = "bulk_batch_size"
 
 DEFAULT_RESTORE_LAST_UPDATED = False
 DEFAULT_RESTORE_LAST_TRIGGERED = True
@@ -93,16 +94,16 @@ BULK_WINDOW_DAYS = 30
 
 # With "track all entities" the candidate list can be thousands of entities;
 # one recorder query with an IN(...) list that long gets slow and
-# memory-hungry. Split into chunks of this size instead.
-#
-# Since the bulk query is streamed batch by batch (see _iter_bulk_batches)
-# rather than merged, this is also the peak-memory knob: one batch of
-# BULK_WINDOW_DAYS-wide history is resident at a time, so the ceiling is
-# roughly BULK_BATCH_SIZE x (rows per entity in the window) x row size.
-# Chatty entities (power meters, frequently-polled sensors) can contribute
-# tens of thousands of rows each, so keep this well below the entity count
-# of a large installation; the cost of a smaller value is only more
-# round-trips, which the recorder handles far better than a huge result set.
+# memory-hungry. Split into chunks of this size instead, streamed one batch
+# at a time (see _iter_bulk_batches) so only one batch of history is
+# resident at once instead of the whole installation's — this is therefore
+# the peak-memory knob, configurable per entry via CONF_BULK_BATCH_SIZE. The
+# window is BULK_WINDOW_DAYS wide and rows come back as full state objects,
+# so chatty entities (power meters, frequently-polled sensors) can each
+# contribute many thousands of rows; keep this well below the entity count
+# of a large installation. The cost of a smaller value is only more
+# round-trips, which the recorder handles far better than a large resident
+# result set (see GitHub issue: OOMs on 3000+ entities).
 BULK_BATCH_SIZE = 250
 
 # States that are not real usage (mainly restart artifacts).

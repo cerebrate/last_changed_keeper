@@ -2,6 +2,68 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.2] — 2026-08-14
+### Fixed
+- **Unbounded memory growth during the bulk recorder pass.** The bulk query
+  was chunked by batch size, but every chunk was still merged into one dict
+  held live for the whole resolve pass — on a large "track all entities"
+  install the merged result is every significant state change of every
+  entity over the 30-day bulk window, easily gigabytes, and the `verify`
+  service (which checks every target, not just fresh boot candidates) was
+  the worst case. The bulk fetch is now a streaming generator
+  (`_iter_bulk_batches`): each batch is resolved and dropped before the
+  next query runs, so peak memory stays at roughly one batch instead of the
+  whole installation. The default batch size is lowered from 500 to 250
+  now that it is the direct peak-memory knob (configurable per entry since
+  0.9.1).
+- **Exponential retry fan-out on repeated re-registration failure.** A
+  runtime re-registration (config entry reload, a Zigbee/Z-Wave device
+  rejoining) that failed to resolve on a retry used to arm a *fresh* ladder
+  of `len(retry_delays)` timers on top of the ones already running, instead
+  of replacing them — so an entity that kept failing to resolve multiplied
+  its in-flight recorder queries roughly 1.5× every 30 s until the grace
+  window closed, rather than staying capped at one ladder per
+  re-registration. Retries are now armed at exactly one entry point.
+- **Boot-pass restore time regression** introduced by the streaming fix
+  above: because a streamed pass can itself take a while, the per-batch
+  re-validation used to compare elapsed time since boot against `grace`
+  again, which — for an entity that never actually changed — really just
+  measured how long the pass itself had been running. Once that elapsed
+  time crossed `grace`, every remaining candidate in a slow pass was
+  silently skipped and never retried. The re-check now compares against
+  each candidate's `last_changed` as snapshotted when the candidate list
+  was built, which is what it was always meant to measure.
+
+### Added
+- **Recorder-cost instrumentation.** Boot-pass stats (and the `verify`
+  service response) now include `bulk_rows_fetched`, `bulk_batches`, and
+  `deep_queries` (prefixed `verify_*` for the post-boot self-check) —
+  visible on the status sensor/diagnostics, so the recorder cost of a pass
+  is inspectable without inferring it from wall-clock duration.
+
+### Changed
+- The incremental snapshot store's debounced write now goes through
+  `Store.async_delay_save` (already used for the run-history store) instead
+  of an untracked `async_create_task` per flush, so closely-spaced flushes
+  coalesce into one write.
+
+Ported from field-validated fixes developed and tested against a real
+~3,500-entity installation at
+[cerebrate/last_changed_keeper#1](https://github.com/cerebrate/last_changed_keeper/pull/1)
+and [#2](https://github.com/cerebrate/last_changed_keeper/pull/2) — see
+GitHub issue #1 for the investigation history.
+
+## [0.9.1] — 2026-08-14
+### Added
+- **Configurable bulk-query batch size.** The 500-entities-per-query batch
+  size introduced in 0.9.0 is now a setup/reconfigure/options field
+  (default unchanged at 500). Installs with very large tracked-entity
+  counts that still see high memory use during the bulk pass can lower it;
+  the merged result of a batch is still held for the whole resolve pass, so
+  this is a mitigation, not a fix, for the underlying memory-growth issue —
+  see GitHub issue #1 for the ongoing investigation of a proper streaming
+  fix.
+
 ## [0.9.0] — 2026-08-05
 ### Added
 - **Status sensor.** A diagnostic sensor ("Restored entities") whose state is
