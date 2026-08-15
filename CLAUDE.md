@@ -72,6 +72,22 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    "bounded" run (recorder history shows an older, different value) is
    definitive; an "unbounded" one (history exhausted) is only trusted under
    specific conditions — see the docstrings on `_resolve` and `_real_last_changed`.
+   One of those conditions is `_near_purge_boundary`: every HA restart writes
+   a fresh recorder row for each entity even when its value hasn't changed
+   (the live in-place `last_changed` patch never gets written back to the
+   recorder DB), so a same-value run walking past a string of restarts looks
+   identical to one that's genuinely never changed — until it runs out of
+   retained rows. Once `purge_keep_days` has erased the older restarts, "ran
+   out of rows" and "reached the real origin" are indistinguishable from
+   inside that entity's own history, so an unbounded result landing at or
+   before the recorder's purge boundary (`Recorder.keep_days`, read directly
+   rather than inferred from the database, plus `PURGE_BOUNDARY_MARGIN_DAYS`
+   to absorb purge running periodically rather than continuously) is
+   discarded rather than trusted. This trades a class of confidently-wrong
+   backdates (and ones that silently drift to a new wrong value every time
+   purge erodes further) for those entities being left unpatched — same as
+   an uninstalled integration — for as long as their true last change
+   predates what the recorder retains.
 5. `_apply()` sets `State.last_changed` directly (no public HA API for this)
    and clears the state's internal `_cache` dict so the new value is visible;
    if the cache shape is unrecognized (future HA internals change) it raises a
