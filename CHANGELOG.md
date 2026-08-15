@@ -2,6 +2,56 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.3] — 2026-08-15
+### Fixed
+- **Confidently-wrong `last_changed` on entities older than the recorder's
+  purge window.** Every HA restart writes a fresh recorder row for each
+  entity even when its value hasn't changed — the live in-place
+  `last_changed` patch this integration applies never gets written back to
+  the recorder database, so the raw "reset to restart time" row is always
+  there for the next pass to see. `_resolve`'s best-effort unbounded path
+  (step 4) is specifically designed to walk straight through those
+  same-value restart rows and keep looking for a genuinely older value, but
+  once `purge_keep_days` has erased the earlier restarts, "ran out of rows"
+  and "found the real origin" are indistinguishable from inside a single
+  entity's own history. On an install with several restarts inside the
+  retention window and typical retention shorter than how long some
+  entities go without a real change (automations never disabled, alerts
+  that have never fired, long-clear presence sensors), this reliably landed
+  on the oldest *surviving restart artifact* and reported it as the genuine
+  timestamp — sometimes applied directly at boot, sometimes only surfaced
+  later by `verify` once further purge attrition flipped an entity from
+  "correctly declined" (blocked by the existing `HISTORY_DEPTH` guard) to
+  "confidently wrong," with no real change to the entity in between. Worse,
+  the wrong answer wasn't stable: each restart that outlived the retention
+  window could drag the same entity's `last_changed` forward again, to
+  whichever restart artifact was now oldest.
+
+  `_resolve` now reads the recorder's actual retention boundary directly
+  (`Recorder.keep_days`/`auto_purge`, rather than inferring it by querying
+  the database) and discards — rather than applies — any unbounded result
+  landing at or before that boundary (`PURGE_BOUNDARY_MARGIN_DAYS` absorbs
+  purge running periodically rather than continuously). Field-diagnosed
+  against a real ~3,500-entity installation: a `verify` pass reported 1,693
+  mismatches, the great majority clustered within a couple of seconds of a
+  single timestamp that was exactly `purge_keep_days` (14 in this case) old
+  — a previous restart, not a real event, confirmed by cross-checking
+  against the oldest surviving row in the recorder database.
+
+  **Trade-off, worth understanding before upgrading:** this closes a class
+  of silent wrong answers, but it cannot recover them — the information the
+  fix needs is exactly what purge already deleted. For any entity whose
+  true last real change predates `purge_keep_days`, this integration will
+  now leave `last_changed` at the restart-reset value indefinitely (same as
+  if it weren't installed for that entity) rather than guess, until either
+  the entity genuinely changes again or retention is extended past however
+  long that entity tends to stay unchanged. In practice this most affects
+  exactly the "very stable, long-lived" entities this integration is often
+  installed to help with, so the honest "don't know" is the safer default,
+  not a full fix for the underlying information gap. A `verify` mismatch
+  count after upgrading should drop accordingly, but a lower count here
+  reflects fewer *false positives*, not more entities actually restored.
+
 ## [0.9.2] — 2026-08-14
 ### Fixed
 - **Unbounded memory growth during the bulk recorder pass.** The bulk query

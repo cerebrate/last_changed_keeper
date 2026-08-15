@@ -89,6 +89,18 @@ MARGIN_SECONDS = 1.5
 # Depth of the per-entity fallback query.
 HISTORY_DEPTH = 100
 
+# Extra margin (days) added on top of the recorder's own purge_keep_days when
+# deciding whether an "unbounded, history exhausted" resolve result (_resolve
+# step 4) is trustworthy. Recorder purge runs periodically rather than
+# continuously (its own default interval is once a day), so the oldest row
+# actually still in the database can lag the nominal now-minus-keep_days
+# cutoff by up to about a purge cycle. Without this margin, a same-value run
+# that happens to end right at that lag would look like it reached a real
+# origin when it may have simply run out of retained rows — indistinguishable
+# from a restart artifact whose earlier history was purged (see the
+# _near_purge_boundary docstring).
+PURGE_BOUNDARY_MARGIN_DAYS = 2
+
 # Time window (days) for the bulk query of all entities at once.
 BULK_WINDOW_DAYS = 30
 

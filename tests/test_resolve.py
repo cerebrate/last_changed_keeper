@@ -156,6 +156,84 @@ async def test_deep_query_best_effort_used_when_window_not_exhausted(
     assert result == oldest
 
 
+async def test_unbounded_deep_result_discarded_near_purge_boundary(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """A same-value run that runs out of rows right at (or past) the
+    recorder's purge boundary is indistinguishable from one whose earlier,
+    same-value restarts simply aged out of the database - it must not be
+    trusted as a genuine origin (see _near_purge_boundary)."""
+    hass.states.async_set("automation.stable", "on")
+    await hass.async_block_till_done()
+    live = hass.states.get("automation.stable")
+
+    now = live.last_changed
+    oldest = now - timedelta(days=20)
+    rows = [FakeRow("on", oldest, oldest), FakeRow("on", now, now)]
+
+    def fake_get_last_state_changes(_hass, _number_of_states, entity_id):
+        return {entity_id: rows}
+
+    monkeypatch.setattr(lck, "get_last_state_changes", fake_get_last_state_changes)
+    monkeypatch.setattr(lck.get_instance(hass), "keep_days", 10)
+
+    job = _make_job(hass)
+    result = await job._resolve("automation.stable", live, None)
+    assert result is None
+
+
+async def test_unbounded_deep_result_used_when_well_inside_purge_boundary(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """The purge-boundary guard only rejects results at/near the boundary -
+    a plausible surviving origin comfortably inside the retention window is
+    still trusted as best effort, same as before the guard existed."""
+    hass.states.async_set("automation.stable", "on")
+    await hass.async_block_till_done()
+    live = hass.states.get("automation.stable")
+
+    now = live.last_changed
+    oldest = now - timedelta(days=3)
+    rows = [FakeRow("on", oldest, oldest), FakeRow("on", now, now)]
+
+    def fake_get_last_state_changes(_hass, _number_of_states, entity_id):
+        return {entity_id: rows}
+
+    monkeypatch.setattr(lck, "get_last_state_changes", fake_get_last_state_changes)
+    monkeypatch.setattr(lck.get_instance(hass), "keep_days", 10)
+
+    job = _make_job(hass)
+    result = await job._resolve("automation.stable", live, None)
+    assert result == oldest
+
+
+async def test_purge_boundary_guard_skipped_when_auto_purge_disabled(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """With auto_purge off there is no enforced retention boundary to
+    distrust results near, so the pre-existing best-effort behavior applies
+    even to a result that would otherwise look boundary-adjacent."""
+    hass.states.async_set("automation.stable", "on")
+    await hass.async_block_till_done()
+    live = hass.states.get("automation.stable")
+
+    now = live.last_changed
+    oldest = now - timedelta(days=20)
+    rows = [FakeRow("on", oldest, oldest), FakeRow("on", now, now)]
+
+    def fake_get_last_state_changes(_hass, _number_of_states, entity_id):
+        return {entity_id: rows}
+
+    monkeypatch.setattr(lck, "get_last_state_changes", fake_get_last_state_changes)
+    recorder_instance = lck.get_instance(hass)
+    monkeypatch.setattr(recorder_instance, "keep_days", 10)
+    monkeypatch.setattr(recorder_instance, "auto_purge", False)
+
+    job = _make_job(hass)
+    result = await job._resolve("automation.stable", live, None)
+    assert result == oldest
+
+
 async def test_counters_track_deep_queries_only_when_step_3_runs(
     recorder_mock, hass: HomeAssistant, monkeypatch
 ) -> None:
