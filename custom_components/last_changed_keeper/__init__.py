@@ -104,6 +104,7 @@ from .const import (
     LAST_TRIGGERED_DOMAINS,
     MARGIN_SECONDS,
     MAX_RUN_HISTORY,
+    PURGE_BOUNDARY_MARGIN_DAYS,
     RETRY_DELAYS,
     SERVICE_RESTORE_NOW,
     SERVICE_VERIFY,
@@ -889,12 +890,47 @@ class _RestoreJob:
         # HISTORY_DEPTH rather than by reaching an older value (frequent on
         # attribute-noisy domains like climate/humidifier), run_start is only
         # "oldest of the last N rows", not the true start — too unreliable to
-        # use, so it is discarded rather than applied.
-        if _ok(ts2) and len(deep_states) < HISTORY_DEPTH:
+        # use, so it is discarded rather than applied. Likewise, if the run
+        # genuinely exhausted history right at (or just past) the recorder's
+        # purge boundary, that's indistinguishable from a same-value run
+        # whose earlier restarts simply aged out of the database — see
+        # _near_purge_boundary — so it is discarded too rather than guessed
+        # at as if it were a confirmed origin.
+        if (
+            _ok(ts2)
+            and len(deep_states) < HISTORY_DEPTH
+            and not self._near_purge_boundary(ts2)
+        ):
             return ts2
-        if _ok(bulk_ts):
+        if _ok(bulk_ts) and not self._near_purge_boundary(bulk_ts):
             return bulk_ts
         return None
+
+    def _near_purge_boundary(self, ts: datetime) -> bool:
+        """True if ts is close enough to the recorder's purge boundary that
+        it can't be trusted as a genuine origin (see _resolve step 4).
+
+        Once a same-value run's earlier restarts age out of the recorder
+        under purge_keep_days, "history exhausted" no longer means "reached
+        the real first occurrence" — it can just as easily mean "the older,
+        equally-artificial rows that used to bound this run aren't there
+        anymore". The two are indistinguishable from inside a single
+        entity's history, so any unbounded result landing at or before the
+        boundary (plus PURGE_BOUNDARY_MARGIN_DAYS, to absorb purge running
+        only periodically rather than continuously) is treated as unproven
+        rather than applied. If auto-purge is off there is no enforced
+        retention boundary to compare against, so the check is skipped.
+        """
+        try:
+            instance = get_instance(self.hass)
+        except Exception:  # noqa: BLE001 - recorder must not kill anything
+            return False
+        if not instance.auto_purge:
+            return False
+        boundary = dt_util.utcnow() - timedelta(
+            days=instance.keep_days + PURGE_BOUNDARY_MARGIN_DAYS
+        )
+        return ts <= boundary
 
     def _newer_snapshot_ts(
         self, entity_id: str, state: str, than: datetime
