@@ -5,7 +5,9 @@ Home Assistant restart — directly on the entity.
 
 Sources (in this order):
 1. Recorder bulk query (batched over all candidates, streamed one batch at
-   a time so peak memory stays at one batch) — fast on startup.
+   a time, and capped per entity to the newest BULK_PER_ENTITY_LIMIT genuine
+   value changes, so peak memory stays at one bounded batch) — fast on
+   startup.
 2. Incremental/periodic store (see async_write_snapshot and
    _on_target_state_changed) — preferred over the bulk result when it holds a
    newer, still-usable timestamp for the same value (e.g. recorder commit
@@ -32,15 +34,13 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.history import (
-    get_last_state_changes,
-    get_significant_states,
-)
+from homeassistant.components.recorder.history import get_last_state_changes
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import (
@@ -64,15 +64,28 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
+from homeassistant.helpers.recorder import session_scope
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 from homeassistant.util.read_only_dict import ReadOnlyDict
+from sqlalchemy import func, or_, select
+
+# Internal recorder module (unlike the public helpers above): HA has
+# reorganized it before (states_meta split in 2023.4, history package moves).
+# Guarded so a future move degrades _bulk_query into the per-batch fallback
+# path (empty batch -> snapshot/deep query, see _iter_bulk_batches) instead
+# of an ImportError taking the whole integration down.
+try:
+    from homeassistant.components.recorder.db_schema import States, StatesMeta
+except ImportError:  # pragma: no cover - only hit on future HA reorganization
+    States = StatesMeta = None  # type: ignore[assignment,misc]
 
 from .const import (
     ATTR_LAST_TRIGGERED,
     BULK_BATCH_SIZE,
+    BULK_PER_ENTITY_LIMIT,
     BULK_WINDOW_DAYS,
     CONF_ALL_ENTITIES,
     CONF_AREAS,
@@ -890,19 +903,27 @@ class _RestoreJob:
         # HISTORY_DEPTH rather than by reaching an older value (frequent on
         # attribute-noisy domains like climate/humidifier), run_start is only
         # "oldest of the last N rows", not the true start — too unreliable to
-        # use, so it is discarded rather than applied. Likewise, if the run
-        # genuinely exhausted history right at (or just past) the recorder's
-        # purge boundary, that's indistinguishable from a same-value run
-        # whose earlier restarts simply aged out of the database — see
-        # _near_purge_boundary — so it is discarded too rather than guessed
-        # at as if it were a confirmed origin.
+        # use, so it is discarded rather than applied. The bulk result gets
+        # the same treatment against its own cap (BULK_PER_ENTITY_LIMIT):
+        # a full-length result means the window function truncated the
+        # history, not that the run's true start was reached. Likewise, if
+        # the run genuinely exhausted history right at (or just past) the
+        # recorder's purge boundary, that's indistinguishable from a
+        # same-value run whose earlier restarts simply aged out of the
+        # database — see _near_purge_boundary — so it is discarded too
+        # rather than guessed at as if it were a confirmed origin.
         if (
             _ok(ts2)
             and len(deep_states) < HISTORY_DEPTH
             and not self._near_purge_boundary(ts2)
         ):
             return ts2
-        if _ok(bulk_ts) and not self._near_purge_boundary(bulk_ts):
+        if (
+            _ok(bulk_ts)
+            and bulk_states is not None
+            and len(bulk_states) < BULK_PER_ENTITY_LIMIT
+            and not self._near_purge_boundary(bulk_ts)
+        ):
             return bulk_ts
         return None
 
@@ -956,13 +977,13 @@ class _RestoreJob:
         list can be thousands of entities, and a single IN(...) query that
         long gets slow and memory-hungry.
 
-        Yielding per batch rather than returning one merged dict is what
-        bounds peak memory. The window is BULK_WINDOW_DAYS wide and the rows
-        come back as full state objects, so the merged result for a large
-        installation is every significant state change of every entity over
-        a month — easily gigabytes, and all of it was previously held live
-        for the whole resolve pass. Streaming caps the resident set at one
-        batch instead of the entire installation.
+        Yielding per batch rather than returning one merged dict bounds peak
+        memory at one batch instead of the entire installation. Within a
+        batch, _bulk_query additionally caps rows per entity at
+        BULK_PER_ENTITY_LIMIT (see its docstring), so a batch is at most
+        batch_size x BULK_PER_ENTITY_LIMIT small rows — without that cap, a
+        single chatty entity's 30-day history could balloon one batch to
+        hundreds of MB regardless of batch size.
 
         Both this generator and the caller must drop their reference to a
         batch before the next query runs, or the peak is two batches rather
@@ -1388,17 +1409,108 @@ def _entities_for_labels_and_areas(
     return out
 
 
+@dataclass(slots=True)
+class _BulkRow:
+    """One genuine value-change row from the capped bulk query — just the
+    three fields the resolve walk reads, instead of a full State object."""
+
+    state: str | None
+    last_changed: datetime
+    last_updated: datetime
+
+
 def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> dict:
-    """In the recorder executor: fetch significant states for many entities."""
-    return get_significant_states(
-        hass,
-        start,
-        None,
-        entity_ids,
-        include_start_time_state=False,
-        significant_changes_only=True,
-        no_attributes=True,
+    """In the recorder executor: per entity, the newest BULK_PER_ENTITY_LIMIT
+    genuine value-change rows within the bulk window.
+
+    Replaces get_significant_states, which is unbounded per entity in two
+    ways that OOM large installations (verified empirically on a real
+    recorder DB): a chatty sensor whose VALUE changes every few seconds
+    returns every one of its 10^5-10^6 rows in the window
+    (significant_changes_only only drops attribute-writes), and entities in
+    the recorder's hard-coded SIGNIFICANT_DOMAINS (climate, device_tracker,
+    humidifier, thermostat, water_heater) return even attribute-only rows.
+    Neither can be capped through that API — it has no per-entity LIMIT.
+
+    This query keeps only genuine value changes for EVERY domain
+    (last_changed_ts is NULL when the value changed at that row, i.e. equals
+    last_updated; on attribute-only rows it is set and older) and caps rows
+    per entity with a window function, so a batch is bounded by
+    BULK_BATCH_SIZE x BULK_PER_ENTITY_LIMIT small rows. Dropping
+    attribute-only rows never changes the resolve walk's outcome: such a row
+    always carries the same value as its neighbours, so it can neither bound
+    a run nor move its start. unavailable/unknown rows are likewise dropped
+    at the SQL layer: _real_last_changed discards them unread anyway, but
+    with a per-entity cap they must not eat cap slots — a device flapping
+    availability a few dozen times a day would otherwise push the run's
+    bounding row out of the capped result and silently defeat restoration
+    for exactly the flaky-connectivity devices most likely to need it.
+    NULL-state rows (entity removal) are kept: they genuinely bound runs.
+    Window functions need SQLite >= 3.25 / MariaDB >= 10.2 / MySQL 8 / any
+    PostgreSQL — all far below Home Assistant's own database minimums.
+    """
+    if States is None or StatesMeta is None:
+        # Import-time fallback (see the guarded db_schema import): raising
+        # here lands in _iter_bulk_batches' per-batch catch, which yields an
+        # empty result so every entity resolves via snapshot/deep instead.
+        raise RuntimeError("recorder db_schema models unavailable")
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=States.metadata_id,
+            order_by=States.last_updated_ts.desc(),
+        )
+        .label("rn")
     )
+    inner = (
+        select(
+            StatesMeta.entity_id,
+            States.state,
+            States.last_updated_ts,
+            States.last_changed_ts,
+            rn,
+        )
+        .join(StatesMeta, States.metadata_id == StatesMeta.metadata_id)
+        .where(
+            StatesMeta.entity_id.in_(entity_ids),
+            States.last_updated_ts > start.timestamp(),
+            or_(
+                States.last_changed_ts.is_(None),
+                States.last_changed_ts == States.last_updated_ts,
+            ),
+            # NOT IN would drop NULL-state rows too (NULL NOT IN (...) is
+            # NULL, not TRUE) — keep them explicitly, they bound runs.
+            or_(
+                States.state.is_(None),
+                States.state.not_in(INVALID_STATES),
+            ),
+        )
+        .subquery()
+    )
+    stmt = select(
+        inner.c.entity_id,
+        inner.c.state,
+        inner.c.last_updated_ts,
+        inner.c.last_changed_ts,
+    ).where(inner.c.rn <= BULK_PER_ENTITY_LIMIT)
+
+    result: dict[str, list[_BulkRow]] = {}
+    with session_scope(hass=hass, read_only=True) as session:
+        for entity_id, state, last_updated_ts, last_changed_ts in session.execute(
+            stmt
+        ):
+            if last_updated_ts is None:
+                continue
+            last_updated = dt_util.utc_from_timestamp(last_updated_ts)
+            last_changed = (
+                dt_util.utc_from_timestamp(last_changed_ts)
+                if last_changed_ts is not None
+                else last_updated
+            )
+            result.setdefault(entity_id, []).append(
+                _BulkRow(state, last_changed, last_updated)
+            )
+    return result
 
 
 def _real_last_changed(
