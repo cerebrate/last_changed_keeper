@@ -104,18 +104,27 @@ PURGE_BOUNDARY_MARGIN_DAYS = 2
 # Time window (days) for the bulk query of all entities at once.
 BULK_WINDOW_DAYS = 30
 
+# Per-entity row cap for the bulk query: at most this many of an entity's
+# NEWEST genuine value-change rows are fetched per pass. This is what bounds
+# a batch's size in rows (BULK_BATCH_SIZE only bounds it in entities): a
+# chatty power sensor changing every few seconds has 10^5-10^6 rows in the
+# bulk window, and without a per-entity cap a single such entity makes its
+# whole batch balloon to hundreds of MB regardless of batch size. The resolve
+# walk only ever needs the newest run of same-value rows plus one older,
+# differing row to bound it — for entities where even the cap's rows are all
+# the same value, the result is depth-capped and treated as unreliable, the
+# same rule the per-entity deep query applies via HISTORY_DEPTH.
+BULK_PER_ENTITY_LIMIT = 100
+
 # With "track all entities" the candidate list can be thousands of entities;
 # one recorder query with an IN(...) list that long gets slow and
 # memory-hungry. Split into chunks of this size instead, streamed one batch
 # at a time (see _iter_bulk_batches) so only one batch of history is
-# resident at once instead of the whole installation's — this is therefore
-# the peak-memory knob, configurable per entry via CONF_BULK_BATCH_SIZE. The
-# window is BULK_WINDOW_DAYS wide and rows come back as full state objects,
-# so chatty entities (power meters, frequently-polled sensors) can each
-# contribute many thousands of rows; keep this well below the entity count
-# of a large installation. The cost of a smaller value is only more
-# round-trips, which the recorder handles far better than a large resident
-# result set (see GitHub issue: OOMs on 3000+ entities).
+# resident at once instead of the whole installation's. Together with
+# BULK_PER_ENTITY_LIMIT below this bounds a batch to
+# BULK_BATCH_SIZE x BULK_PER_ENTITY_LIMIT small rows; the batch size is
+# configurable per entry via CONF_BULK_BATCH_SIZE, and the cost of a smaller
+# value is only more round-trips (see GitHub issue: OOMs on 3000+ entities).
 BULK_BATCH_SIZE = 250
 
 # States that are not real usage (mainly restart artifacts).
