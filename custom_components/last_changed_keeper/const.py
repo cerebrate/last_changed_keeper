@@ -101,8 +101,24 @@ HISTORY_DEPTH = 100
 # _near_purge_boundary docstring).
 PURGE_BOUNDARY_MARGIN_DAYS = 2
 
-# Time window (days) for the bulk query of all entities at once.
+# Time window (days) for the bulk query of all entities at once. Superseded
+# by BULK_WINDOW_STAGES_HOURS below (kept as the equivalent total lookback
+# reference — the widest stage equals this many days).
 BULK_WINDOW_DAYS = 30
+
+# PROTOTYPE (staged-widening bulk query, see _iter_bulk_batches): query the
+# narrowest window first for every candidate; only entities whose result is
+# still *unbounded* (no genuine differing value found - see
+# _real_last_changed) escalate to the next, wider stage. A bounded result at
+# any stage is definitive (the walk only needs the newest same-value run
+# plus the single row that bounds it - more history further back can't
+# change that answer), so this is a transparent optimization, not a
+# behavior change: an entity that resolves at stage 1 gets the identical
+# answer a flat 30-day query would have given it, just without paying for
+# the other 29+ days of rows. The widest stage (720h = 30 days) exactly
+# matches BULK_WINDOW_DAYS, so an entity that never resolves costs the same
+# as today's single-window query, no more.
+BULK_WINDOW_STAGES_HOURS = (6, 48, 720)
 
 # With "track all entities" the candidate list can be thousands of entities;
 # one recorder query with an IN(...) list that long gets slow and

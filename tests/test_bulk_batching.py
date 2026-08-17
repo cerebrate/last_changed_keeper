@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import weakref
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -39,20 +39,33 @@ def _make_job(hass: HomeAssistant, options: dict | None = None) -> _RestoreJob:
     return _RestoreJob(hass, entry, store, {})
 
 
+def _bounded_rows(now: datetime) -> list[FakeRow]:
+    """A 2-row result that resolves as bounded on the first (narrowest)
+    staged query, so staging never escalates past stage 1 - keeps tests
+    that aren't about staging itself focused on what they actually test."""
+    return [
+        FakeRow("off", now - timedelta(hours=1), now - timedelta(hours=1)),
+        FakeRow("on", now - timedelta(minutes=10), now - timedelta(minutes=10)),
+    ]
+
+
 async def test_bulk_batches_split_by_batch_size(
     recorder_mock, hass: HomeAssistant, monkeypatch
 ) -> None:
     calls: list[list[str]] = []
+    now = dt_util.utcnow()
+    ids = [f"light.l{i}" for i in range(5)]
+    for entity_id in ids:
+        hass.states.async_set(entity_id, "on")
 
     def fake_bulk_query(_hass, _start, entity_ids):
         calls.append(list(entity_ids))
-        return {eid: [] for eid in entity_ids}
+        return {eid: _bounded_rows(now) for eid in entity_ids}
 
     monkeypatch.setattr(lck, "_bulk_query", fake_bulk_query)
     monkeypatch.setattr(lck, "BULK_BATCH_SIZE", 2)
 
     job = _make_job(hass)
-    ids = [f"light.l{i}" for i in range(5)]
     batches = [(chunk, result) async for chunk, result in job._iter_bulk_batches(ids)]
 
     assert [len(c) for c in calls] == [2, 2, 1]
@@ -111,10 +124,12 @@ async def test_bulk_batches_are_not_retained_across_queries(
     refs: list[weakref.ref] = []
     alive_at_query: list[int] = []
 
+    now = dt_util.utcnow()
+
     def fake_bulk_query(_hass, _start, entity_ids):
         # Count previously yielded batches still reachable right now.
         alive_at_query.append(sum(1 for ref in refs if ref() is not None))
-        result = _Batch({eid: [] for eid in entity_ids})
+        result = _Batch({eid: _bounded_rows(now) for eid in entity_ids})
         refs.append(weakref.ref(result))
         return result
 
@@ -147,15 +162,18 @@ async def test_bulk_batches_use_configured_batch_size(
     recorder_mock, hass: HomeAssistant, monkeypatch
 ) -> None:
     calls: list[list[str]] = []
+    now = dt_util.utcnow()
+    ids = [f"light.l{i}" for i in range(7)]
+    for entity_id in ids:
+        hass.states.async_set(entity_id, "on")
 
     def fake_bulk_query(_hass, _start, entity_ids):
         calls.append(list(entity_ids))
-        return {eid: [] for eid in entity_ids}
+        return {eid: _bounded_rows(now) for eid in entity_ids}
 
     monkeypatch.setattr(lck, "_bulk_query", fake_bulk_query)
     # Module default is untouched; the per-entry option must win over it.
     job = _make_job(hass, options={CONF_BULK_BATCH_SIZE: 3})
-    ids = [f"light.l{i}" for i in range(7)]
     delivered: dict[str, list] = {}
     async for _chunk, result in job._iter_bulk_batches(ids):
         delivered.update(result)

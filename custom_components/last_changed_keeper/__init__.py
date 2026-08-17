@@ -5,7 +5,9 @@ Home Assistant restart — directly on the entity.
 
 Sources (in this order):
 1. Recorder bulk query (batched over all candidates, streamed one batch at
-   a time so peak memory stays at one batch) — fast on startup.
+   a time so peak memory stays at one batch, staged-widening per entity and
+   routing SIGNIFICANT_DOMAINS entities around it entirely — see
+   _iter_bulk_batches) — fast on startup.
 2. Incremental/periodic store (see async_write_snapshot and
    _on_target_state_changed) — preferred over the bulk result when it holds a
    newer, still-usable timestamp for the same value (e.g. recorder commit
@@ -38,6 +40,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.history import (
+    SIGNIFICANT_DOMAINS,
     get_last_state_changes,
     get_significant_states,
 )
@@ -73,7 +76,7 @@ from homeassistant.util.read_only_dict import ReadOnlyDict
 from .const import (
     ATTR_LAST_TRIGGERED,
     BULK_BATCH_SIZE,
-    BULK_WINDOW_DAYS,
+    BULK_WINDOW_STAGES_HOURS,
     CONF_ALL_ENTITIES,
     CONF_AREAS,
     CONF_BULK_BATCH_SIZE,
@@ -957,12 +960,8 @@ class _RestoreJob:
         long gets slow and memory-hungry.
 
         Yielding per batch rather than returning one merged dict is what
-        bounds peak memory. The window is BULK_WINDOW_DAYS wide and the rows
-        come back as full state objects, so the merged result for a large
-        installation is every significant state change of every entity over
-        a month — easily gigabytes, and all of it was previously held live
-        for the whole resolve pass. Streaming caps the resident set at one
-        batch instead of the entire installation.
+        bounds peak memory. Streaming caps the resident set at one batch
+        instead of the entire installation.
 
         Both this generator and the caller must drop their reference to a
         batch before the next query runs, or the peak is two batches rather
@@ -972,21 +971,71 @@ class _RestoreJob:
         A failed batch yields an empty result but still yields its chunk, so
         those entities fall back to the snapshot/per-entity path in
         `_resolve` exactly as before instead of being skipped.
+
+        Within a batch, two things bound how much history is actually
+        fetched (see BULK_WINDOW_STAGES_HOURS's docstring for why both are
+        safe, transparent optimizations rather than behavior changes):
+
+        - SIGNIFICANT_DOMAINS entities (climate/device_tracker/humidifier/
+          thermostat/water_heater) are excluded from the bulk query
+          entirely. The recorder's own get_significant_states intentionally
+          returns attribute-only rows for these domains (e.g. climate's
+          current_temperature, for history graphs) — for our purposes
+          that's pure noise that can balloon a chatty entity's row count
+          without ever containing a genuine value change. These entities
+          simply never appear in the returned dict, so `_resolve` falls
+          through to the snapshot/deep-query path (step 2/3) for them
+          exactly as it already does for any entity bulk didn't cover — the
+          same HISTORY_DEPTH-capped, already-tested get_last_state_changes
+          query that domain already relies on for its `deep_queries` stat.
+        - The remaining entities are queried at the narrowest window first,
+          escalating per-entity to the next stage only if still unbounded.
         """
-        start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
         batch_size = self._bulk_batch_size
+        now = dt_util.utcnow()
         for i in range(0, len(entity_ids), batch_size):
             chunk = entity_ids[i : i + batch_size]
-            try:
-                result = await get_instance(self.hass).async_add_executor_job(
-                    _bulk_query, self.hass, start, chunk
-                )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug(
-                    "Bulk recorder query failed (batch %d, %d entities): %s",
-                    i // batch_size, len(chunk), err,
-                )
-                result = {}
+            pending_ids = [
+                e for e in chunk if e.split(".", 1)[0] not in SIGNIFICANT_DOMAINS
+            ]
+            result: dict[str, list] = {}
+            for stage_index, stage_hours in enumerate(BULK_WINDOW_STAGES_HOURS):
+                if not pending_ids:
+                    break
+                start = now - timedelta(hours=stage_hours)
+                try:
+                    stage_result = await get_instance(
+                        self.hass
+                    ).async_add_executor_job(_bulk_query, self.hass, start, pending_ids)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "Bulk recorder query failed (batch %d, stage %dh, "
+                        "%d entities): %s",
+                        i // batch_size, stage_hours, len(pending_ids), err,
+                    )
+                    stage_result = {}
+                result.update(stage_result)
+                is_last_stage = stage_index == len(BULK_WINDOW_STAGES_HOURS) - 1
+                still_unbounded = []
+                if not is_last_stage:
+                    for entity_id in pending_ids:
+                        live = self.hass.states.get(entity_id)
+                        rows = stage_result.get(entity_id)
+                        if live is None or not rows:
+                            still_unbounded.append(entity_id)
+                            continue
+                        _, bounded = _real_last_changed(rows, live.state)
+                        if not bounded:
+                            still_unbounded.append(entity_id)
+                # Drop the reference to this stage's raw query result now
+                # that its rows are copied into `result` - a generator's
+                # locals stay alive across `yield`, so leaving this bound
+                # would keep the batch reachable one iteration too long
+                # (see test_bulk_batches_are_not_retained_across_queries).
+                stage_result = {}
+                if is_last_stage:
+                    break
+                pending_ids = still_unbounded
             yield chunk, result
             result = {}
 
