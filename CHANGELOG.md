@@ -2,7 +2,10 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.4] — 2026-08-17
+## [0.9.5] — 2026-08-17
+_(0.9.4 is skipped here — upstream independently used that version number for
+an unrelated bulk-query fix; see [hiSweid/last_changed_keeper](https://github.com/hiSweid/last_changed_keeper)
+0.9.4.)_
 ### Fixed
 - **The snapshot store could get permanently poisoned with a restart
   artifact, causing `last_changed` to stay wrong across every subsequent
