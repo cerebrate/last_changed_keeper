@@ -302,6 +302,12 @@ class _RestoreJob:
         self._final_fired = False
         self.stats: dict[str, object] = {}
 
+        # Entities whose live last_changed is still an unconfirmed restart
+        # artifact (a candidate this session that _resolve() has not yet
+        # been able to patch) — see async_write_snapshot, which must not
+        # persist these into the snapshot store as if they were real.
+        self._unconfirmed: set[str] = set()
+
         # ----- Feature: rolling run history + boot self-check --------------
         # runs_store is None in direct unit-test construction; persistence is
         # then simply skipped (run_history stays in-memory only).
@@ -473,6 +479,17 @@ class _RestoreJob:
         boot (see _resolve) — otherwise it could stamp the *previous* value's
         last_changed onto a genuinely new value.
 
+        For an entity still in _unconfirmed (a restart candidate this
+        session that _resolve() has never managed to patch), live.last_changed
+        is itself just this restart's raw reset value, not a real timestamp —
+        writing it here would poison the snapshot with that artifact, and
+        _resolve's step 2 would then confidently reapply it on every future
+        boot (comfortably clearing the margin check against each new restart's
+        fresher cutoff) without ever reaching the deep/best-effort steps that
+        would find the real answer. So an unconfirmed entity's *existing*
+        stored entry (if any) is carried forward unchanged instead — no worse
+        than before, and not actively made wrong.
+
         Used both as the EVENT_HOMEASSISTANT_STOP listener (receives an
         Event) and as the periodic snapshot timer (receives a datetime) —
         the argument itself is never used, both just trigger a fresh write.
@@ -481,8 +498,14 @@ class _RestoreJob:
         data: dict[str, dict[str, str]] = {}
         for entity_id in self._targets(domains, entities, exclude, labels, areas):
             live = self.hass.states.get(entity_id)
-            if live is not None and live.state not in INVALID_STATES:
-                data[entity_id] = {"s": live.state, "t": live.last_changed.isoformat()}
+            if live is None or live.state in INVALID_STATES:
+                continue
+            if entity_id in self._unconfirmed:
+                prior = self._snapshot.get(entity_id)
+                if prior is not None:
+                    data[entity_id] = prior
+                continue
+            data[entity_id] = {"s": live.state, "t": live.last_changed.isoformat()}
         await self._store.async_save(data)
         # Keep the in-memory copy in sync with what's on disk: this is also
         # what naturally bounds the incremental store's size (see
@@ -541,6 +564,7 @@ class _RestoreJob:
             live = self.hass.states.get(entity_id)
             if live is None or live.state in INVALID_STATES:
                 self._pending.add(entity_id)
+                self._unconfirmed.add(entity_id)
                 continue
             if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
                 continue  # already really used since boot
@@ -580,15 +604,25 @@ class _RestoreJob:
                 live = self.hass.states.get(entity_id)
                 if live is None or live.state in INVALID_STATES:
                     self._pending.add(entity_id)
+                    self._unconfirmed.add(entity_id)
                     continue
                 if live.last_changed != candidate_last_changed[entity_id]:
-                    continue  # changed for real while we were awaiting the query
+                    # Changed for real while we were awaiting the query — this
+                    # last_changed reflects genuine usage, not an artifact.
+                    self._unconfirmed.discard(entity_id)
+                    continue
                 if await self._maybe_restore_last_triggered(entity_id):
                     patched_triggered += 1
                 ts = await self._resolve(entity_id, live, bulk.get(entity_id), counters)
                 if ts is not None:
                     self._apply(live, ts, entity_id)
                     patched += 1
+                else:
+                    # _resolve couldn't confirm anything: live.last_changed is
+                    # still this restart's raw reset value. Tracked so
+                    # async_write_snapshot doesn't persist it as if it were
+                    # real (see _unconfirmed).
+                    self._unconfirmed.add(entity_id)
             del bulk  # released before the next batch is fetched
 
         # Resolve a stale repair issue once the cache patch works again
@@ -993,6 +1027,7 @@ class _RestoreJob:
     # ----- Applying ------------------------------------------------------
 
     def _apply(self, live: State, ts: datetime, entity_id: str) -> None:
+        self._unconfirmed.discard(entity_id)
         ok = _apply_last_changed(live, ts, self._also_updated)
         if not ok and not self._degraded:
             self._degraded = True
@@ -1142,6 +1177,9 @@ class _RestoreJob:
         await self._maybe_restore_last_triggered(entity_id)
         ts = await self._resolve(entity_id, live, None)
         if ts is None:
+            # Unresolved: live.last_changed is still this re-registration's
+            # raw reset value — see _unconfirmed.
+            self._unconfirmed.add(entity_id)
             return _RETRY_WORTHWHILE
         self._apply(live, ts, entity_id)
         _LOGGER.debug("%s: re-patched after runtime re-registration", entity_id)
@@ -1224,6 +1262,7 @@ class _RestoreJob:
             return
         if new.state in INVALID_STATES or old.state == new.state:
             return
+        self._unconfirmed.discard(new.entity_id)
         self._dirty[new.entity_id] = {
             "s": new.state,
             "t": new.last_changed.isoformat(),
