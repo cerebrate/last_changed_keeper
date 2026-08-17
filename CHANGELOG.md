@@ -2,6 +2,51 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.4] — 2026-08-17
+### Fixed
+- **Unbounded rows per entity in the bulk pass — the remaining OOM driver
+  (#1).** v0.9.2's streaming bounded the boot/verify pass at one *batch*,
+  but a batch was still unbounded in *rows*: `get_significant_states` has
+  no per-entity limit, so a single chatty power sensor contributed its
+  entire 30-day history (10⁵–10⁶ rows, ~0.7 GB per million rows measured
+  against a real recorder DB) to its batch regardless of batch size — and
+  for entities in the recorder's hard-coded significant domains (`climate`,
+  `device_tracker`, `humidifier`, `thermostat`, `water_heater`) even
+  attribute-only rows came back unfiltered. Both effects were confirmed
+  empirically (20 000 inserted rows → 20 000 returned, in all three cases).
+
+  The bulk query is now a direct window-function query over the recorder's
+  `states`/`states_meta` tables: only genuine value-change rows (for every
+  domain), capped at the newest `BULK_PER_ENTITY_LIMIT` (100) rows per
+  entity, returned as lightweight rows instead of full `State` objects. A
+  batch is now bounded at `bulk_batch_size × 100` small rows (≈ a few MB)
+  no matter how chatty the installation. `unavailable`/`unknown` rows are
+  excluded at the SQL layer so availability flapping cannot push a run's
+  bounding row out of the capped result. The per-entity resolve walk now
+  also runs over at most 100 rows, removing the multi-hundred-ms event-loop
+  stalls that the old per-entity `sorted()` over full histories caused.
+- **Depth-cap trust rule for the capped bulk result.** A full-length
+  (100-row) *unbounded* run means the cap truncated the history, not that
+  the run's true origin was reached — such results are now discarded in the
+  best-effort path, mirroring the existing `HISTORY_DEPTH` rule for the
+  per-entity deep query. Bounded runs are unaffected: truncation can only
+  ever hide a bounding row, never fabricate one.
+
+### Changed
+- Attribute-noisy entities in the recorder's significant domains now
+  resolve exactly like every other domain (their attribute chatter
+  previously pushed the old query's unbounded best-effort timestamp to the
+  bulk-window edge, where the purge-boundary guard usually discarded it;
+  with chatter gone, their genuine rows resolve under the same best-effort
+  rules as all other entities).
+- The `states`/`states_meta` model import is guarded: if a future Home
+  Assistant release relocates the internal `db_schema` module, the bulk
+  pass degrades to the per-batch fallback (snapshot / capped deep query)
+  instead of failing to load.
+- `bulk_rows_fetched` in the run stats now counts genuine value-change
+  rows only, so its numbers drop sharply compared to earlier releases —
+  that's the fix working, not missing data.
+
 ## [0.9.3] — 2026-08-15
 ### Fixed
 - **Confidently-wrong `last_changed` on entities older than the recorder's
