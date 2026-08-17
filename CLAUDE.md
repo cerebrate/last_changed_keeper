@@ -122,6 +122,25 @@ Only usable as a resolve source if the entity still holds the *same* value
 recorded in the snapshot, otherwise the timestamp belongs to a different
 value. A separate small store (`STORAGE_KEY_RUNS`) keeps a rolling history
 (`MAX_RUN_HISTORY`) of boot-pass stats, feeding the status sensor/diagnostics.
+Both `async_write_snapshot` (periodic timer and clean-shutdown write) read
+`live.last_changed` straight off the state machine — but for a boot
+candidate that `_resolve()` never manages to patch (any reason: still
+racing the recorder, a legitimate too-recent decline, whatever), that value
+*is* just this restart's raw reset artifact, not a real timestamp. Writing
+it into the snapshot store anyway would poison it: on every future boot,
+`_resolve()`'s snapshot step sees the same still-unchanged value and a
+stored timestamp that's comfortably older than the *new* restart's cutoff,
+clears the margin check, and confidently reapplies that wrong value —
+permanently, since nothing before this ever invalidated a stale entry.
+`self._unconfirmed` tracks exactly this set of not-yet-proven-real entities
+(added when a candidate's `_resolve()` returns nothing or it never
+resolves out of `_pending`/a re-registration retry ladder; discarded by
+`_apply()` on any successful patch and by the incremental listener on any
+genuine value change) so the snapshot writer can leave a poisoned or
+unwritten entry alone instead of overwriting it with the artifact.
+Upgrading past the fix does not retroactively clean an *already*-poisoned
+on-disk snapshot — clear `.storage/last_changed_keeper.snapshot` once after
+upgrading to let it rebuild through the now-safe resolve chain.
 
 **Service `last_changed_keeper.restore_now`** and event `last_changed_keeper_restored`
 (fired `final=False` after the initial pass, `final=True` once `_pending`
