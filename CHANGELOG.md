@@ -2,6 +2,58 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.5] — 2026-08-17
+### Fixed
+- **The snapshot store could get permanently poisoned with a restart
+  artifact, causing `last_changed` to stay wrong across every subsequent
+  restart.** Every HA restart resets `last_changed` to the restart moment
+  for all entities before this integration gets a chance to correct it. If
+  `_resolve()` couldn't find/apply a real timestamp for a given candidate
+  during some boot pass — for any reason (a recorder race, a legitimate
+  "just changed, too recent" decline, or anything else) — that entity's
+  live `last_changed` stayed at the raw, uncorrected restart-reset value
+  for the rest of that session. The periodic snapshot timer and the
+  clean-shutdown snapshot write both read `live.last_changed` straight off
+  the state machine with no way to tell a confirmed real value from an
+  unconfirmed artifact, so that uncorrected value got written into the
+  persistent snapshot store as if it were genuine.
+
+  From that point on the wrong value was self-reinforcing: on every future
+  boot, `_resolve()`'s snapshot check (step 2, checked before the deep/
+  best-effort steps that would find the real answer) saw the entity still
+  holding the same value, and the poisoned timestamp was — by definition —
+  older than the *new* restart's fresh cutoff, so it comfortably cleared
+  the margin check and got confidently reapplied. This happened silently,
+  every single boot, without ever reaching the recorder-query steps that
+  would have found the true value, and it was completely independent of
+  (and unaffected by) the 0.9.3 purge-boundary fix, which only touches the
+  best-effort unbounded step, not the snapshot short-circuit ahead of it.
+
+  Field-diagnosed on the same real installation as 0.9.3: after upgrading,
+  a `verify` pass still reported ~1,600 mismatches, barely down from the
+  pre-0.9.3 count. Direct (read-only) queries against the installation's
+  recorder database confirmed the mechanism precisely: entities' *live*
+  `last_changed` matched one of their own earlier restart's own artifact
+  rows still sitting in the database, while `verify`'s freshly recomputed
+  answer matched the oldest surviving row for that entity exactly to the
+  microsecond — and the installation's own `.storage/last_changed_keeper.snapshot`
+  held that same wrong, restart-artifact timestamp for the affected
+  entities.
+
+  `_resolve()` no longer accepts blame for this: entities whose live
+  `last_changed` is still an unconfirmed restart artifact are now tracked
+  (`_unconfirmed`, cleared on any successful patch or genuine value change),
+  and both snapshot write paths preserve an unconfirmed entity's *existing*
+  stored entry (or leave it unwritten if there isn't one) instead of
+  overwriting it with the unverified live value.
+
+  **This does not retroactively fix an already-poisoned snapshot** — the
+  fix only stops *new* poisoning. If you're upgrading from an affected
+  version, clear `.storage/last_changed_keeper.snapshot` once (with Home
+  Assistant stopped) to let it rebuild cleanly through the now-safe resolve
+  chain; leaving it in place means already-wrong entities stay wrong until
+  their value genuinely changes for real.
+
 ## [0.9.4] — 2026-08-17
 ### Fixed
 - **Unbounded rows per entity in the bulk pass — the remaining OOM driver

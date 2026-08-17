@@ -233,6 +233,63 @@ async def test_resolve_prefers_newer_store_value_over_bulk_when_bounded(
     assert result == newer_store_ts
 
 
+
+# ----- async_write_snapshot(): must not poison the store with an --------
+# ----- unconfirmed restart artifact (see _unconfirmed in __init__.py) ---
+
+
+async def test_snapshot_write_preserves_prior_entry_for_unconfirmed_entity(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """An entity still in _unconfirmed (a boot candidate _resolve() never
+    managed to patch) must not have its raw, unresolved live.last_changed
+    overwrite whatever the store already held for it - that would poison
+    the store with a restart artifact, which _resolve()'s snapshot step
+    would then confidently reapply on every future boot."""
+    hass.states.async_set("light.kitchen", "on")
+    good_ts = dt_util.utcnow() - timedelta(days=3)
+    job = _make_job(
+        hass, snapshot={"light.kitchen": {"s": "on", "t": good_ts.isoformat()}}
+    )
+    job._unconfirmed.add("light.kitchen")
+
+    await job.async_write_snapshot()
+
+    assert job._snapshot["light.kitchen"] == {"s": "on", "t": good_ts.isoformat()}
+
+
+async def test_snapshot_write_omits_unconfirmed_entity_with_no_prior_entry(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """Same as above, but with nothing previously stored - there is no
+    better answer to fall back to, so the entity is simply left out rather
+    than seeded with an unresolved value."""
+    hass.states.async_set("light.kitchen", "on")
+    job = _make_job(hass)
+    job._unconfirmed.add("light.kitchen")
+
+    await job.async_write_snapshot()
+
+    assert "light.kitchen" not in job._snapshot
+
+
+async def test_snapshot_write_uses_live_value_for_confirmed_entity(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """Control case: an entity not in _unconfirmed is written from its
+    current live state as before."""
+    hass.states.async_set("light.kitchen", "on")
+    live = hass.states.get("light.kitchen")
+    job = _make_job(hass)
+
+    await job.async_write_snapshot()
+
+    assert job._snapshot["light.kitchen"] == {
+        "s": "on",
+        "t": live.last_changed.isoformat(),
+    }
+
+
 async def test_resolve_ignores_older_store_value_when_bulk_bounded(
     recorder_mock, hass: HomeAssistant
 ) -> None:
