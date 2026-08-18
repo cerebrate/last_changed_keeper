@@ -126,8 +126,8 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    the re-check the retry pass would issue a redundant recorder query for
    an entity the drain already resolved and discarded moments earlier.
 
-**Two persistent listeners run for the whole entry lifetime (not just boot),
-set up once from `_async_run_impl`:**
+**Two persistent listeners plus a periodic discovery sweep run for the whole
+entry lifetime (not just boot), set up once from `_async_run_impl`:**
 - `_setup_reregister_listener` — fires on two distinct HA-level artifacts,
   both of which reset an entity's `last_changed` to "now" without the value
   having genuinely changed: (1) an already-watched entity fully disappearing
@@ -167,6 +167,43 @@ set up once from `_async_run_impl`:**
   listener's job above, and merging either one in here would write the raw
   reset artifact into the snapshot store as if it were a real value change,
   poisoning it the same way `async_write_snapshot` guards against elsewhere.
+
+Both listeners above subscribe against `self._known_targets`, a *fixed*
+`entity_id` set — `async_track_state_change_event` has no API to add IDs to
+an existing subscription. `_async_run_impl` only sets `self._known_targets`
+once, from whatever `resolve_targets()` returns at that instant (entities
+that already have a live state). An entity whose owning integration is
+still mid-setup at boot (a coordinator doing its first data fetch before
+creating entities — common for cloud/hub/mesh integrations enumerating many
+child devices, observed taking anywhere from seconds to ~17 minutes after
+HA "started" on a real installation) is invisible to that snapshot, and
+therefore to *every* patch mechanism this integration has, for the rest of
+the session — it only gets a chance again at the next full restart, where
+the same race can recur. `async_verify` doesn't have this gap since it
+re-resolves targets fresh on every call, which is why `verify` can report a
+correct answer for an entity nothing ever actually corrects live.
+
+`_async_scan_for_new_targets` closes this: a periodic timer
+(`NEW_TARGET_SCAN_INTERVAL_SECONDS`) re-resolves targets and diffs against
+`self._known_targets`. Any newly-matching entities are folded in, both
+persistent listeners are cancelled and recreated via
+`_resubscribe_persistent_listeners` against the enlarged set, and the new
+entities are driven through `_drain_reregister_burst` — the exact same
+batched resolve/patch path a runtime re-registration burst already uses,
+since "just discovered" and "just re-registered" both start from a live
+`last_changed` that's a raw reset/creation artifact rather than a real
+value. A sweep rather than an event-driven listener is deliberate: the
+failure mode is minutes-scale (matching the existing `RETRY_DELAYS`
+timescale), so a periodic re-check closes essentially the whole gap without
+adding a new *permanently* subscribed global `state_changed` listener that
+would run on every state change instance-wide, forever, to shave a few
+minutes off an already-minutes-scale problem. Because `_async_run_impl`
+must set up this sweep (and the two listeners above) even when
+`resolve_targets()` currently returns nothing — a domain/label/area-based
+config where that domain's integration hasn't created any entities yet at
+boot is precisely the case the sweep exists to cover — the `if not targets:
+return 0` short-circuit only skips the boot candidate-patching loop below
+it, not this setup.
 
 **`last_triggered`** (for `automation.*`/`script.*`) is a *separate* patch
 path (`_maybe_restore_last_triggered` / `_resolve_last_triggered` /

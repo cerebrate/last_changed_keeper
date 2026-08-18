@@ -124,6 +124,7 @@ from .const import (
     LAST_TRIGGERED_DOMAINS,
     MARGIN_SECONDS,
     MAX_RUN_HISTORY,
+    NEW_TARGET_SCAN_INTERVAL_SECONDS,
     PENDING_RECOVERY_DEBOUNCE_SECONDS,
     PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
@@ -363,6 +364,16 @@ class _RestoreJob:
         self._dirty_since: datetime | None = None
         self._flush_timer: CALLBACK_TYPE | None = None
 
+        # ----- Feature: periodic target-discovery sweep --------------------
+        # Entities matching the configured criteria that the persistent
+        # listeners (above) are currently subscribed to — grows over the
+        # entry's lifetime as _async_scan_for_new_targets finds entities
+        # that didn't exist yet when _async_run_impl took its one-time boot
+        # snapshot. See _async_scan_for_new_targets for why that snapshot
+        # alone isn't enough.
+        self._known_targets: set[str] = set()
+        self._unsub_target_discovery_timer: CALLBACK_TYPE | None = None
+
     # ----- Configuration -------------------------------------------------
 
     @property
@@ -448,8 +459,8 @@ class _RestoreJob:
     @callback
     def shutdown(self) -> None:
         """Cancel everything (on unload/reload): boot machinery, the
-        persistent re-registration listener/retries, and the incremental
-        store listener/timer."""
+        persistent re-registration listener/retries, the incremental store
+        listener/timer, and the target-discovery sweep timer."""
         self._stop_boot_machinery()
         self._stop_reregister_listener()
         self._cancel_all_reregister_retries()
@@ -460,6 +471,7 @@ class _RestoreJob:
         self._cancel_flush_timer()
         self._dirty.clear()
         self._dirty_since = None
+        self._cancel_target_discovery_timer()
         if self._unsub_verify_timer is not None:
             self._unsub_verify_timer()
             self._unsub_verify_timer = None
@@ -523,6 +535,12 @@ class _RestoreJob:
         if self._flush_timer is not None:
             self._flush_timer()
             self._flush_timer = None
+
+    @callback
+    def _cancel_target_discovery_timer(self) -> None:
+        if self._unsub_target_discovery_timer is not None:
+            self._unsub_target_discovery_timer()
+            self._unsub_target_discovery_timer = None
 
     # ----- Snapshot ------------------------------------------------------
 
@@ -596,14 +614,28 @@ class _RestoreJob:
         self._also_restore_triggered = self._restore_last_triggered_enabled
         domains, entities, exclude, grace, labels, areas = self._config
         targets = self._targets(domains, entities, exclude, labels, areas)
-        if not targets:
-            return 0
+        self._known_targets = targets
 
         # Persistent, entry-lifetime listeners (independent of the boot
         # pending/listener machinery below, and not torn down when the boot
-        # pass settles — see _stop_boot_machinery vs shutdown()).
-        self._setup_reregister_listener(targets)
-        self._setup_incremental_listener(targets)
+        # pass settles — see _stop_boot_machinery vs shutdown()). Set up
+        # even when targets is currently empty: the discovery sweep is
+        # exactly what covers a domain/label/area-based config where
+        # nothing matches *yet* (that domain's integration hasn't finished
+        # creating its entities at boot at all) — skipping this setup here
+        # on an empty boot-time snapshot would silently defeat the sweep
+        # for precisely the installs it exists to help.
+        self._setup_reregister_listener()
+        self._setup_incremental_listener()
+        self._unsub_target_discovery_timer = async_track_time_interval(
+            self.hass,
+            self._async_scan_for_new_targets,
+            timedelta(seconds=NEW_TARGET_SCAN_INTERVAL_SECONDS),
+            cancel_on_shutdown=True,
+        )
+
+        if not targets:
+            return 0
 
         self._startup = dt_util.utcnow()
         self._pending = set()
@@ -1273,7 +1305,7 @@ class _RestoreJob:
     # ----- Re-patch on runtime re-registration -----------------------------
 
     @callback
-    def _setup_reregister_listener(self, targets: set[str]) -> None:
+    def _setup_reregister_listener(self) -> None:
         """Persistent listener (entry lifetime, not just the boot pass) for
         an already-watched entity's last_changed getting reset to "now" by
         something other than a full HA restart: either the entity being
@@ -1290,9 +1322,15 @@ class _RestoreJob:
         (common for Zigbee/Z-Wave/network devices) drifts wrong forever,
         self-healing only at the next full restart. Registered after boot
         has already assigned every entity its initial state, so it never
-        fires for that initial assignment."""
+        fires for that initial assignment.
+
+        Subscribes against self._known_targets rather than taking a
+        parameter, since _resubscribe_persistent_listeners needs to recreate
+        this subscription against an enlarged set as
+        _async_scan_for_new_targets discovers entities that didn't exist
+        at boot — see that method's docstring."""
         self._unsub_reregister_listener = async_track_state_change_event(
-            self.hass, list(targets), self._on_entity_reregistered
+            self.hass, list(self._known_targets), self._on_entity_reregistered
         )
 
     @callback
@@ -1489,15 +1527,70 @@ class _RestoreJob:
         if await self._attempt_reregister_patch(entity_id, grace) is True:
             self._cancel_reregister_retry(entity_id)
 
+    # ----- Periodic target-discovery sweep ----------------------------------
+
+    async def _async_scan_for_new_targets(self, _now: datetime | None = None) -> None:
+        """Periodic timer callback (see NEW_TARGET_SCAN_INTERVAL_SECONDS).
+
+        _async_run_impl resolves targets exactly once, at boot, from
+        whatever entities already have a live state at that instant. An
+        entity whose owning integration is still mid-setup at that moment
+        (a coordinator doing its first data fetch before creating entities —
+        common for cloud/hub/mesh integrations enumerating many child
+        devices) is invisible to that one-time snapshot, and therefore
+        invisible to every patch mechanism this integration has — the boot
+        pass, the re-registration listener, and the incremental listener all
+        only know about entity_ids that existed at that instant. Without
+        this sweep such an entity stays wrong for the rest of the session,
+        only getting a chance again at the next full restart, where the
+        same race can recur. async_verify doesn't have this gap since it
+        re-resolves targets fresh on every call — this sweep gives the live
+        listeners the same freshness, just on a timer instead of on demand.
+
+        Newly found entities are folded into self._known_targets and driven
+        through _drain_reregister_burst — the exact same batched
+        resolve/patch path a burst of runtime re-registrations already
+        uses, since "just discovered" and "just re-registered" need
+        identical handling (both start from a live last_changed that is a
+        raw reset/creation artifact, not a real value).
+        """
+        domains, entities, exclude, _, labels, areas = self._config
+        current = self._targets(domains, entities, exclude, labels, areas)
+        new_targets = current - self._known_targets
+        if not new_targets:
+            return
+        self._known_targets |= new_targets
+        self._resubscribe_persistent_listeners()
+        # Mark unconfirmed immediately, same reasoning as
+        # _on_entity_reregistered: a snapshot write racing in before the
+        # drain below completes must not persist these entities' current
+        # (first-creation-time) last_changed as if it were real.
+        self._unconfirmed |= new_targets
+        self.hass.async_create_task(self._drain_reregister_burst(new_targets))
+
+    @callback
+    def _resubscribe_persistent_listeners(self) -> None:
+        """async_track_state_change_event's subscription is a fixed
+        entity_id list with no API to add ids to an existing one — covering
+        a newly discovered entity means cancelling and re-registering both
+        persistent listeners against the enlarged self._known_targets."""
+        self._stop_reregister_listener()
+        self._stop_incremental_listener()
+        self._setup_reregister_listener()
+        self._setup_incremental_listener()
+
     # ----- Incremental runtime store ---------------------------------------
 
     @callback
-    def _setup_incremental_listener(self, targets: set[str]) -> None:
+    def _setup_incremental_listener(self) -> None:
         """Persistent listener (entry lifetime) that debounce-merges every
         genuine value change of a watched entity into the same store used
-        for the periodic/shutdown snapshot — see _on_target_state_changed."""
+        for the periodic/shutdown snapshot — see _on_target_state_changed.
+
+        Subscribes against self._known_targets rather than taking a
+        parameter — see _setup_reregister_listener's docstring for why."""
         self._unsub_incremental_listener = async_track_state_change_event(
-            self.hass, list(targets), self._on_target_state_changed
+            self.hass, list(self._known_targets), self._on_target_state_changed
         )
 
     @callback
