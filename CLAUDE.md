@@ -65,7 +65,17 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    post-boot self-check) expose the recorder cost of a pass — how many
    rows it fetched and how many entities fell through to the expensive
    per-entity query — via the status sensor/diagnostics, instead of that
-   only being inferable from wall-clock duration.
+   only being inferable from wall-clock duration. `_iter_bulk_batches` also
+   pushes a zero-delay `asyncio.sleep(0)` after each batch — a large "track
+   all entities" install can mean many batches back to back, each a
+   synchronous query on the recorder's own single-worker executor, and
+   without a yield point there our own coroutine is immediately ready
+   again the instant one batch resolves, crowding out other ready
+   callbacks on the main event loop for the whole pass. `sleep(0)` costs
+   nothing in wall-clock time (unlike a real delay); it only gives other
+   already-ready work a fair turn between batches, shared by every caller
+   of this generator (boot pass, verify, and the re-registration/pending-
+   recovery burst drains alike).
 4. Per entity, `_resolve()` picks the real timestamp in this priority order:
    **bulk result → incremental/periodic snapshot store (if newer for the same
    value) → deep per-entity recorder query → best-effort unbounded run**. A

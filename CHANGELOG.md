@@ -4,6 +4,18 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
 
 ## [0.9.6] — 2026-08-18
 ### Changed
+- **The streamed bulk recorder query (`_iter_bulk_batches`, shared by the
+  boot pass, `verify`, and the re-registration/pending-recovery burst
+  drains) now paces itself with a zero-delay `asyncio.sleep(0)` after each
+  batch.** A large "track all entities" install can mean many batches back
+  to back, each a synchronous query on the recorder's own single-worker
+  executor; without a yield point between them, the pass's own coroutine
+  was immediately ready again the instant one batch resolved, which could
+  crowd out other ready callbacks on the main event loop for the whole
+  pass. `sleep(0)` is a pure yield with no added delay — pacing this way
+  costs nothing in wall-clock time, it only gives other already-ready work
+  a fair turn between batches.
+
 - **Runtime re-registrations (a config entry reload, a Zigbee/Z-Wave device
   or coordinator rejoining) are now coalesced into a single batched drain
   instead of firing one recorder query per entity.** Previously, every
