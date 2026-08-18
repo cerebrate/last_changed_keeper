@@ -4,6 +4,40 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
 
 ## [0.9.6] — 2026-08-18
 ### Changed
+- **`_patch_all_pending` (the scheduled/manual retry sweep of `self._pending`)
+  now re-checks each entity's pending membership immediately before
+  querying it, instead of only once when the sweep's snapshot was taken.**
+  A scheduled retry pass and the boot-pending recovery burst's drain (see
+  below) are both coroutines that yield control at their own await points,
+  so they can run concurrently: without the re-check, a retry pass working
+  through its snapshot could still call into an entity the drain had
+  already resolved and discarded moments earlier, issuing a wasted
+  redundant recorder query for it. Existing margin/bounded-run checks in
+  `_resolve()` already prevented this from producing a *wrong* value, but
+  the redundant work was needless recorder load that grows with how often
+  the two paths overlap.
+
+- **The boot-pending recovery listener (entities still unavailable/unknown
+  when the boot pass ran) now coalesces unavailable→real transitions into a
+  single batched drain, the same treatment already given to the
+  re-registration listener above.** Previously, every transition
+  immediately spawned its own task issuing its own targeted, per-entity
+  recorder query (`_patch_pending`, always querying without bulk data). A
+  mass recovery early in boot — a Zigbee/Z-Wave mesh finishing formation and
+  announcing many devices within the same few seconds — fired one recorder
+  query per entity all at once, and each of those queries used the raw,
+  undeduplicated deep query rather than the recorder's genuine-value-change
+  bulk query, the same correctness gap fixed for re-registrations above.
+
+  Transitions are now debounce-coalesced (`PENDING_RECOVERY_DEBOUNCE_SECONDS`,
+  capped by `PENDING_RECOVERY_MAX_WAIT_SECONDS`) into a burst set, then
+  drained together via `_drain_pending_recovery_burst`, which reuses the
+  boot pass's streaming bulk-query machinery (`_iter_bulk_batches`). Unlike
+  the re-registration burst there's no separate per-entity retry ladder
+  here: an entity the drain can't resolve simply stays in `_pending`, same
+  as it always has, for the existing scheduled retry passes
+  (`_schedule_retries` / `_patch_all_pending`) to pick up later.
+
 - **The streamed bulk recorder query (`_iter_bulk_batches`, shared by the
   boot pass, `verify`, and the re-registration/pending-recovery burst
   drains) now paces itself with a zero-delay `asyncio.sleep(0)` after each

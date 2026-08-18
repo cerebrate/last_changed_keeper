@@ -124,6 +124,8 @@ from .const import (
     LAST_TRIGGERED_DOMAINS,
     MARGIN_SECONDS,
     MAX_RUN_HISTORY,
+    PENDING_RECOVERY_DEBOUNCE_SECONDS,
+    PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
     REREGISTER_DEBOUNCE_SECONDS,
     REREGISTER_MAX_WAIT_SECONDS,
@@ -318,6 +320,13 @@ class _RestoreJob:
         self._startup = dt_util.utcnow()
         self._unsub_listener: CALLBACK_TYPE | None = None
         self._unsub_timers: list[CALLBACK_TYPE] = []
+        # Debounce-coalesced burst of pending entities recovering from
+        # unavailable during the boot window, drained together via
+        # _drain_pending_recovery_burst instead of one recorder query per
+        # entity — see _on_pending_entity_recovered.
+        self._pending_recovery_burst: set[str] = set()
+        self._pending_recovery_burst_since: datetime | None = None
+        self._pending_recovery_flush_timer: CALLBACK_TYPE | None = None
         self._degraded = False
         self._also_updated = False
         self._also_restore_triggered = False
@@ -468,12 +477,21 @@ class _RestoreJob:
         for cancel in self._unsub_timers:
             cancel()
         self._unsub_timers.clear()
+        self._cancel_pending_recovery_flush_timer()
+        self._pending_recovery_burst.clear()
+        self._pending_recovery_burst_since = None
 
     @callback
     def _stop_listener(self) -> None:
         if self._unsub_listener is not None:
             self._unsub_listener()
             self._unsub_listener = None
+
+    @callback
+    def _cancel_pending_recovery_flush_timer(self) -> None:
+        if self._pending_recovery_flush_timer is not None:
+            self._pending_recovery_flush_timer()
+            self._pending_recovery_flush_timer = None
 
     @callback
     def _stop_reregister_listener(self) -> None:
@@ -708,7 +726,15 @@ class _RestoreJob:
 
     @callback
     def _setup_listener(self, grace: float) -> None:
-        """Listen for unavailable→real transitions of the pending entities."""
+        """Listen for unavailable→real transitions of the pending entities.
+
+        Individual transitions are debounce-coalesced into a burst set and
+        drained together via _drain_pending_recovery_burst, instead of
+        firing one recorder query per entity — a mass unavailable→real
+        transition early in boot (a Zigbee/Z-Wave mesh finishing formation
+        and announcing many devices within the same few seconds) would
+        otherwise be a thundering herd on the recorder executor.
+        """
 
         @callback
         def _on_change(event: Event) -> None:
@@ -725,11 +751,81 @@ class _RestoreJob:
                 self._pending.discard(entity_id)
                 self._cleanup_if_done()
                 return
-            self.hass.async_create_task(self._patch_pending(entity_id, grace))
+            self._pending_recovery_burst.add(entity_id)
+            now = dt_util.utcnow()
+            if self._pending_recovery_burst_since is None:
+                self._pending_recovery_burst_since = now
+            self._cancel_pending_recovery_flush_timer()
+            elapsed = (now - self._pending_recovery_burst_since).total_seconds()
+            if elapsed >= PENDING_RECOVERY_MAX_WAIT_SECONDS:
+                self._flush_pending_recovery_burst()
+            else:
+                self._pending_recovery_flush_timer = async_call_later(
+                    self.hass,
+                    PENDING_RECOVERY_DEBOUNCE_SECONDS,
+                    self._flush_pending_recovery_burst,
+                )
 
         self._unsub_listener = async_track_state_change_event(
             self.hass, list(self._pending), _on_change
         )
+
+    @callback
+    def _flush_pending_recovery_burst(self, _now: datetime | None = None) -> None:
+        self._cancel_pending_recovery_flush_timer()
+        self._pending_recovery_burst_since = None
+        if not self._pending_recovery_burst:
+            return
+        burst, self._pending_recovery_burst = self._pending_recovery_burst, set()
+        self.hass.async_create_task(self._drain_pending_recovery_burst(burst))
+
+    async def _drain_pending_recovery_burst(self, entity_ids: set[str]) -> None:
+        """Batched replacement for one recorder query per boot-pending
+        entity recovering from unavailable: resolves the whole debounced
+        burst together via the same streaming bulk-query machinery the
+        boot pass uses (_iter_bulk_batches), instead of each firing its own
+        targeted per-entity query (_patch_pending, which — like
+        _attempt_reregister_patch — only ever sees the raw, undeduplicated
+        deep query since it always passes bulk_states=None).
+
+        Entities that don't resolve here are simply left in _pending:
+        unlike the re-registration burst there is no separate per-entity
+        retry ladder to arm here — the existing scheduled retry passes
+        (_schedule_retries / _patch_all_pending) already re-sweep the whole
+        remaining pending set.
+        """
+        candidates: list[str] = []
+        candidate_last_changed: dict[str, datetime] = {}
+        for entity_id in entity_ids:
+            if entity_id not in self._pending:
+                continue  # already resolved by a scheduled retry pass meanwhile
+            live = self.hass.states.get(entity_id)
+            if live is None or live.state in INVALID_STATES:
+                continue
+            candidates.append(entity_id)
+            candidate_last_changed[entity_id] = live.last_changed
+
+        async for chunk, bulk in self._iter_bulk_batches(candidates):
+            for entity_id in chunk:
+                # Re-validate against the snapshot taken above: the bulk
+                # query just awaited the recorder executor, during which the
+                # entity may have gone unavailable again, genuinely changed,
+                # or already been resolved by a scheduled retry pass — see
+                # the matching comment in _async_run_impl.
+                if entity_id not in self._pending:
+                    continue
+                live = self.hass.states.get(entity_id)
+                if live is None or live.state in INVALID_STATES:
+                    continue
+                if live.last_changed != candidate_last_changed[entity_id]:
+                    continue
+                await self._maybe_restore_last_triggered(entity_id)
+                ts = await self._resolve(entity_id, live, bulk.get(entity_id))
+                if ts is not None:
+                    self._apply(live, ts, entity_id)
+                    self._pending.discard(entity_id)
+                    self._cleanup_if_done()
+            del bulk  # released before the next batch is fetched
 
     @callback
     def _schedule_retries(self, grace: float) -> None:
@@ -764,8 +860,21 @@ class _RestoreJob:
         return run_patched
 
     async def _patch_all_pending(self, grace: float) -> int:
+        """Sweep every currently-pending entity once.
+
+        Snapshots _pending up front since entries are removed while this
+        loop runs — but the persistent listener's batched drain
+        (_drain_pending_recovery_burst) can also resolve and discard
+        entities concurrently (this coroutine yields control at every
+        await, including inside _patch_pending itself). Re-checking
+        membership right before each call — not just once at snapshot time
+        — skips entities a concurrent drain already resolved instead of
+        issuing a redundant recorder query for them.
+        """
         run_patched = 0
         for entity_id in list(self._pending):
+            if entity_id not in self._pending:
+                continue
             if await self._patch_pending(entity_id, grace):
                 run_patched += 1
         self.stats["patched_total"] = (

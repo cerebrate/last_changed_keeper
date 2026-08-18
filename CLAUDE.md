@@ -105,6 +105,26 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
 6. Entities still unavailable/unknown go into `self._pending` and get a second
    chance via a state-change listener plus delayed retries (`RETRY_DELAYS`,
    default +30/90/180 s) — catches Zigbee/Z-Wave devices that boot slowly.
+   Individual unavailable→real transitions are debounce-coalesced
+   (`PENDING_RECOVERY_DEBOUNCE_SECONDS`, capped by
+   `PENDING_RECOVERY_MAX_WAIT_SECONDS`) into a burst set and drained
+   together by `_drain_pending_recovery_burst`, reusing the boot pass's
+   streaming bulk-query machinery (`_iter_bulk_batches`) instead of one
+   targeted query per entity — a mass unavailable→real transition early in
+   boot (a Zigbee/Z-Wave mesh finishing formation and announcing many
+   devices within the same few seconds) would otherwise fire one recorder
+   query per entity all at once, the same thundering-herd risk P3.1 fixed
+   for the re-registration listener. Unlike that listener there's no
+   per-entity retry ladder here: an entity the drain can't resolve simply
+   stays in `_pending` for the existing scheduled retry passes
+   (`_schedule_retries` / `_patch_all_pending`) to pick up later.
+   `_patch_all_pending` snapshots `_pending` at the start of its sweep but
+   re-checks membership immediately before each `_patch_pending` call, not
+   just once at snapshot time — a scheduled retry pass and
+   `_drain_pending_recovery_burst` can run concurrently (both are
+   coroutines that yield control at their own await points), and without
+   the re-check the retry pass would issue a redundant recorder query for
+   an entity the drain already resolved and discarded moments earlier.
 
 **Two persistent listeners run for the whole entry lifetime (not just boot),
 set up once from `_async_run_impl`:**

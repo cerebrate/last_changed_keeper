@@ -9,12 +9,16 @@ from datetime import timedelta
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.last_changed_keeper import _RestoreJob
 from custom_components.last_changed_keeper.const import (
     DOMAIN,
     EVENT_RESTORED,
+    PENDING_RECOVERY_DEBOUNCE_SECONDS,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -64,8 +68,14 @@ async def test_fires_not_final_then_final_once_pending_drains(
     assert events[0]["final"] is False
     assert events[0]["pending"] == 1
 
-    # entity recovers -> listener patches it -> pending drains to zero
+    # entity recovers -> listener queues it for the debounced batched drain
+    # (see _drain_pending_recovery_burst) -> pending drains to zero
     hass.states.async_set("light.slow_zigbee", "on")
+    await hass.async_block_till_done()
+    async_fire_time_changed(
+        hass,
+        dt_util.utcnow() + timedelta(seconds=PENDING_RECOVERY_DEBOUNCE_SECONDS + 1),
+    )
     await hass.async_block_till_done()
 
     assert len(events) == 2

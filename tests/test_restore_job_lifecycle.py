@@ -1,5 +1,8 @@
 """Tests for _RestoreJob lifecycle behavior: the single_pass service call
-must not tear down an active boot-time retry/listener pass.
+must not tear down an active boot-time retry/listener pass, and
+_patch_all_pending's sweep of self._pending must stay correct when a
+concurrent burst drain (_drain_pending_recovery_burst) mutates the same set
+mid-sweep.
 """
 from __future__ import annotations
 
@@ -74,3 +77,39 @@ async def test_single_pass_patches_pending_entity_that_recovered(
     assert "light.slow_zigbee" not in job._pending
     # pending is now empty -> _cleanup_if_done() legitimately tore it down.
     assert torn_down == ["listener"]
+
+
+async def test_patch_all_pending_skips_entity_resolved_concurrently(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Regression: _patch_all_pending snapshots _pending at loop start, but
+    the persistent listener's batched drain (_drain_pending_recovery_burst)
+    can resolve and discard an entity from that same set while this loop is
+    still working through its snapshot (this coroutine yields control at
+    every await, including inside _patch_pending). The loop must re-check
+    membership before each call instead of blindly working through the
+    stale snapshot, or it issues a redundant recorder query for an entity a
+    concurrent drain already resolved."""
+    hass.states.async_set("light.a", "on")
+    hass.states.async_set("light.b", "on")
+    job = _make_job(hass)
+    job._pending = {"light.a", "light.b"}
+
+    calls: list[str] = []
+
+    async def fake_patch_pending(entity_id: str, grace: float) -> bool:
+        calls.append(entity_id)
+        # Simulate a concurrent drain resolving the OTHER entity while this
+        # call is "in flight" - regardless of which entity is processed
+        # first, the other one vanishes from _pending mid-sweep.
+        other = "light.b" if entity_id == "light.a" else "light.a"
+        job._pending.discard(other)
+        return False
+
+    monkeypatch.setattr(job, "_patch_pending", fake_patch_pending)
+
+    await job._patch_all_pending(1800)
+
+    # Only the first entity was ever attempted - the second was skipped
+    # because it was no longer pending by the time the loop reached it.
+    assert calls == [calls[0]]
