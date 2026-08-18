@@ -108,6 +108,13 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
    per-entity retry ladder here: an entity the drain can't resolve simply
    stays in `_pending` for the existing scheduled retry passes
    (`_schedule_retries` / `_patch_all_pending`) to pick up later.
+   `_patch_all_pending` snapshots `_pending` at the start of its sweep but
+   re-checks membership immediately before each `_patch_pending` call, not
+   just once at snapshot time — a scheduled retry pass and
+   `_drain_pending_recovery_burst` can run concurrently (both are
+   coroutines that yield control at their own await points), and without
+   the re-check the retry pass would issue a redundant recorder query for
+   an entity the drain already resolved and discarded moments earlier.
 
 **Two persistent listeners run for the whole entry lifetime (not just boot),
 set up once from `_async_run_impl`:**

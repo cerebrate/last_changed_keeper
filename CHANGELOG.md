@@ -4,6 +4,19 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
 
 ## [0.9.6] — 2026-08-18
 ### Changed
+- **`_patch_all_pending` (the scheduled/manual retry sweep of `self._pending`)
+  now re-checks each entity's pending membership immediately before
+  querying it, instead of only once when the sweep's snapshot was taken.**
+  A scheduled retry pass and the boot-pending recovery burst's drain (see
+  below) are both coroutines that yield control at their own await points,
+  so they can run concurrently: without the re-check, a retry pass working
+  through its snapshot could still call into an entity the drain had
+  already resolved and discarded moments earlier, issuing a wasted
+  redundant recorder query for it. Existing margin/bounded-run checks in
+  `_resolve()` already prevented this from producing a *wrong* value, but
+  the redundant work was needless recorder load that grows with how often
+  the two paths overlap.
+
 - **The boot-pending recovery listener (entities still unavailable/unknown
   when the boot pass ran) now coalesces unavailable→real transitions into a
   single batched drain, the same treatment already given to the
