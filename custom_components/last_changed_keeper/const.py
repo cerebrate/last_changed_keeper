@@ -77,6 +77,16 @@ PENDING_RECOVERY_DEBOUNCE_SECONDS = 2
 # reason REREGISTER_MAX_WAIT_SECONDS exists.
 PENDING_RECOVERY_MAX_WAIT_SECONDS = 10
 
+# How often (seconds) to re-check for entities matching the configured
+# target criteria that didn't exist yet when the boot pass took its
+# one-time targets snapshot (see resolve_targets/_async_run_impl) - a
+# coordinator-based integration (hub/mesh, cloud-polling) can take anywhere
+# from seconds to tens of minutes after HA "started" to finish creating its
+# entities, and until this sweep finds them they're invisible to every
+# patch mechanism this integration has (boot pass, re-registration
+# listener, incremental listener) for the rest of the session.
+NEW_TARGET_SCAN_INTERVAL_SECONDS = 300
+
 EVENT_RESTORED = f"{DOMAIN}_restored"
 
 # Snapshot store (fallback when the recorder no longer has the entity).

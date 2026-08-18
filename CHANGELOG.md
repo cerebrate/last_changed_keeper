@@ -2,6 +2,50 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.7] — 2026-08-18
+### Fixed
+- **Entities whose owning integration is still mid-setup when HA "started"
+  fires were invisible to every patch mechanism this integration has, for
+  the entire session.** `_async_run_impl` resolves the set of targets to
+  watch exactly once, at boot, from whatever entities already have a live
+  state at that instant. Any entity that doesn't exist yet at that moment —
+  a coordinator-based integration (cloud-polling, hub/mesh) doing its first
+  data fetch before creating entities is a common cause — was excluded not
+  just from that boot pass, but from the persistent re-registration and
+  incremental-store listeners too, since both subscribe against that same
+  one-time snapshot. The entity's `last_changed` then simply stayed at
+  whatever it was when first created for the rest of the session, with
+  nothing ever correcting it, self-healing only at the next full restart
+  (where the same race could recur for the same reason).
+
+  Field-diagnosed on the same ~3,500-entity installation via a fresh
+  `verify` run: clustering the mismatches' live timestamps by minute showed
+  three restart events, each followed a few minutes later by a second,
+  larger sub-cluster of entities frozen at first-creation time — matching
+  several coordinator-based integrations (an alarm/security hub, a
+  smart-speaker family, a mesh-node integration enumerating many peers)
+  that took anywhere from a couple of minutes up to ~17 minutes after
+  "started" to finish creating their entities. `async_verify` was
+  unaffected since it re-resolves targets fresh on every call — which is
+  exactly why it could report the correct answer for entities nothing ever
+  actually corrected live.
+
+  Adds a periodic discovery sweep (`_async_scan_for_new_targets`, every
+  `NEW_TARGET_SCAN_INTERVAL_SECONDS`) that re-resolves targets, folds any
+  newly-matching entities into `self._known_targets`, resubscribes both
+  persistent listeners against the enlarged set, and drives the new
+  entities through the same batched `_drain_reregister_burst` pipeline a
+  runtime re-registration burst already uses. A periodic sweep rather than
+  an event-driven listener was a deliberate choice: the failure mode is
+  minutes-scale (matching the existing `RETRY_DELAYS` timescale), so a
+  sweep closes essentially the whole gap without adding a new, permanently
+  subscribed global `state_changed` listener running on every state change
+  instance-wide for the entry's whole lifetime. Also fixes a related gap
+  where a domain/label/area-scoped config matching zero entities *at boot*
+  (that domain's integration hasn't created anything yet at all) used to
+  skip setting up the persistent listeners entirely — silently defeating
+  the sweep for exactly the installs it exists to help.
+
 ## [0.9.6] — 2026-08-18
 ### Changed
 - **`_patch_all_pending` (the scheduled/manual retry sweep of `self._pending`)
