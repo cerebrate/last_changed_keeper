@@ -98,27 +98,45 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
 
 **Two persistent listeners run for the whole entry lifetime (not just boot),
 set up once from `_async_run_impl`:**
-- `_setup_reregister_listener` — an already-watched entity that fully
-  disappears and reappears later (config entry reload, device rejoin) gets
-  the same "now" reset a restart causes; this re-patches it, independent of
-  the boot pending/listener machinery (`_stop_boot_machinery` vs. the full
+- `_setup_reregister_listener` — fires on two distinct HA-level artifacts,
+  both of which reset an entity's `last_changed` to "now" without the value
+  having genuinely changed: (1) an already-watched entity fully disappearing
+  and reappearing (config entry reload, device rejoin — `old_state is
+  None`), and (2) an entity merely recovering from `unavailable`/`unknown`
+  to a real value during normal runtime (a brief network/Zigbee/Z-Wave mesh
+  blip — `old_state.state in INVALID_STATES`). HA's state machine treats
+  `unavailable` as a distinct value, so recovering from it bumps
+  `last_changed` the same way a restart does, but unlike a restart nothing
+  else ever revisits that entity afterwards — left uncorrected, an entity
+  that flaps `unavailable` periodically (common for exactly this class of
+  device) drifts wrong forever, self-healing only at the next full restart.
+  Both conditions are patched the same way, independent of the boot
+  pending/listener machinery (`_stop_boot_machinery` vs. the full
   `shutdown()` intentionally only tears down the boot-specific half).
-  Individual re-registration events are debounce-coalesced
-  (`REREGISTER_DEBOUNCE_SECONDS`, capped by `REREGISTER_MAX_WAIT_SECONDS`)
-  into a burst set and drained together by `_drain_reregister_burst`, which
-  reuses the same streaming bulk-query machinery as the boot pass
-  (`_iter_bulk_batches`) rather than issuing one targeted recorder query per
-  entity — otherwise a mass re-registration (a hub's config entry reloading
-  with hundreds of entities, a coordinator reconnecting after an outage)
-  would fire one recorder query per entity all at once. Entities the drain
-  can't resolve still fall back to the existing per-entity retry ladder
-  (`_attempt_reregister_patch` / `RETRY_DELAYS`), which stays untouched since
-  retries are already spread out in time and aren't the burst risk.
+  Qualifying events are debounce-coalesced (`REREGISTER_DEBOUNCE_SECONDS`,
+  capped by `REREGISTER_MAX_WAIT_SECONDS`) into a burst set and drained
+  together by `_drain_reregister_burst`, which reuses the same streaming
+  bulk-query machinery as the boot pass (`_iter_bulk_batches`) rather than
+  issuing one targeted recorder query per entity — otherwise a mass event (a
+  hub's config entry reloading with hundreds of entities, a coordinator
+  reconnecting after an outage) would fire one recorder query per entity all
+  at once. An entity is marked `_unconfirmed` the moment it's queued for the
+  drain (not just on a failed attempt), since `live.last_changed` is the raw
+  reset artifact for as long as it sits in the debounce window. Entities the
+  drain can't resolve still fall back to the existing per-entity retry
+  ladder (`_attempt_reregister_patch` / `RETRY_DELAYS`), which stays
+  untouched since retries are already spread out in time and aren't the
+  burst risk.
 - `_setup_incremental_listener` — every genuine value change of a watched
   entity is debounce-merged (`INCREMENTAL_DEBOUNCE_SECONDS`, capped by
   `INCREMENTAL_MAX_WAIT_SECONDS`) into the same store used for the periodic/
   shutdown snapshot, so it stays close to real-time instead of only updating
-  every `snapshot_interval` or at shutdown.
+  every `snapshot_interval` or at shutdown. Excludes both re-registrations
+  (`old_state is None`) and recoveries from `unavailable`/`unknown`
+  (`old_state.state in INVALID_STATES`) — both are the re-registration
+  listener's job above, and merging either one in here would write the raw
+  reset artifact into the snapshot store as if it were a real value change,
+  poisoning it the same way `async_write_snapshot` guards against elsewhere.
 
 **`last_triggered`** (for `automation.*`/`script.*`) is a *separate* patch
 path (`_maybe_restore_last_triggered` / `_resolve_last_triggered` /

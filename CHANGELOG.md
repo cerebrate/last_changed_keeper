@@ -33,6 +33,43 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   case) still resolves quickly; it just now waits out the short debounce
   window first rather than being patched on the very next event loop tick.
 
+### Fixed
+- **An entity recovering from `unavailable`/`unknown` to a real value during
+  normal runtime (not a restart, not a full re-registration) reset
+  `last_changed` the same way a restart does, but nothing ever corrected it
+  back.** HA's own state machine treats `unavailable`/`unknown` as a
+  distinct value, so a brief network blip, Zigbee/Z-Wave mesh hiccup, or
+  coordinator reconnect that took a device briefly offline and back
+  genuinely bumped its `last_changed` to the recovery moment — even though,
+  from this integration's point of view, that's exactly the same kind of
+  artifact a restart produces. Unlike a restart, nothing previously
+  re-examined that entity afterwards: the boot pass only runs once at
+  startup, and the re-registration listener only fired when an entity was
+  fully re-created (`old_state is None`), not when it merely recovered from
+  an invalid state. Left uncorrected, an entity that flaps `unavailable`
+  periodically — common for exactly this class of device — drifted wrong
+  forever, self-healing only at the next full HA restart.
+
+  Field-diagnosed on the same real installation as 0.9.3/0.9.5: a fresh
+  `verify` pass reported 811 mismatches out of 3,450 checked entities.
+  Cross-referencing each mismatch against the recorder database (read-only)
+  showed 734 of the 811 (90.5%, spread across 16 different domains) were
+  immediately preceded by an `unavailable`/`unknown` row — not a boot reset,
+  not a full re-registration.
+
+  The re-registration listener now also fires on recovery from
+  `unavailable`/`unknown` (`old_state.state in INVALID_STATES`), routing it
+  through the same debounced batched drain as re-registrations. The
+  incremental store listener (`_on_target_state_changed`) now excludes this
+  same transition from its debounce merge — it was previously treating a
+  recovery-from-unavailable exactly like a genuine value change, which would
+  have written the raw reset artifact into the snapshot store as if it were
+  real, poisoning it for the next boot even after the live value was
+  corrected. An entity is now marked `_unconfirmed` the moment it's queued
+  for the drain (not just after a failed attempt), closing a narrow race
+  where a snapshot write during the debounce window could persist the reset
+  artifact before the drain had a chance to correct it.
+
 ## [0.9.5] — 2026-08-17
 ### Fixed
 - **The snapshot store could get permanently poisoned with a restart
