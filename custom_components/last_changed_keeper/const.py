@@ -61,6 +61,22 @@ REREGISTER_DEBOUNCE_SECONDS = 2
 # indefinitely.
 REREGISTER_MAX_WAIT_SECONDS = 10
 
+# Debounce for the boot-pending recovery burst drain (see
+# _on_pending_entity_recovered / _drain_pending_recovery_burst): a mass
+# unavailable-to-real transition early in boot (a Zigbee/Z-Wave mesh
+# finishing formation and announcing many devices within the same few
+# seconds) fires one state-changed event per entity, and reacting to each
+# with its own recorder query is the same thundering-herd risk
+# REREGISTER_DEBOUNCE_SECONDS guards against, just at boot instead of
+# during normal runtime. Kept as its own constant (same value) rather than
+# reusing REREGISTER_DEBOUNCE_SECONDS so the two can be tuned independently
+# if one ever needs to change without affecting the other.
+PENDING_RECOVERY_DEBOUNCE_SECONDS = 2
+# Hard upper bound on how long a continuously-arriving boot recovery burst
+# can push the debounce back before it is drained anyway, for the same
+# reason REREGISTER_MAX_WAIT_SECONDS exists.
+PENDING_RECOVERY_MAX_WAIT_SECONDS = 10
+
 EVENT_RESTORED = f"{DOMAIN}_restored"
 
 # Snapshot store (fallback when the recorder no longer has the entity).
