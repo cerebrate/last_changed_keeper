@@ -1,9 +1,11 @@
-"""Tests for the runtime re-registration path: an already-watched entity
-that gets fully re-created (e.g. its owning config entry reloads, or a
-Zigbee/Z-Wave device rejoins) resets last_changed to "now" the same way a
-full HA restart does. A persistent, entry-lifetime listener (independent of
-the boot-time pending/listener machinery) catches this and re-patches just
-that one entity, respecting the same grace window and retry_delays.
+"""Tests for the runtime re-registration / unavailable-recovery path: an
+already-watched entity that gets fully re-created (e.g. its owning config
+entry reloads, or a Zigbee/Z-Wave device rejoins), or that merely recovers
+from unavailable/unknown to a real value during normal runtime (a brief
+network/mesh blip), resets last_changed to "now" the same way a full HA
+restart does. A persistent, entry-lifetime listener (independent of the
+boot-time pending/listener machinery) catches both cases and re-patches the
+entity, respecting the same grace window and retry_delays.
 """
 from __future__ import annotations
 
@@ -106,6 +108,110 @@ async def test_reregistration_ignored_when_grace_exceeded(
 
     live = hass.states.get("light.kitchen")
     assert live.last_changed == old_ts  # untouched: already older than grace
+
+
+# ----- Recovery from unavailable/unknown ------------------------------------
+
+
+async def test_unavailable_recovery_patches_from_snapshot(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    """A device that flaps unavailable and recovers to the same value during
+    normal runtime (not a restart, not a full re-registration) resets
+    last_changed the same way HA treats any other value change - this must
+    be caught and re-patched exactly like a re-registration is."""
+    stale = dt_util.utcnow() - timedelta(days=2)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"light.kitchen": {"s": "on", "t": stale.isoformat()}},
+    }
+    hass.states.async_set("light.kitchen", "on")
+    await _add_entry(hass)
+
+    # Simulate a brief network/mesh blip: the entity goes unavailable and
+    # recovers to the SAME real value, without ever being fully removed.
+    hass.states.async_set("light.kitchen", "unavailable")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
+
+    live = hass.states.get("light.kitchen")
+    assert live.last_changed == stale
+
+
+async def test_unavailable_recovery_ignored_when_grace_exceeded(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    stale = dt_util.utcnow() - timedelta(days=2)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"light.kitchen": {"s": "on", "t": stale.isoformat()}},
+    }
+    hass.states.async_set("light.kitchen", "on")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_DOMAINS: ["light"], CONF_ENTITIES: [], "grace_seconds": 60},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    hass.states.async_set("light.kitchen", "unavailable")
+    await hass.async_block_till_done()
+    old_ts = dt_util.utcnow() - timedelta(seconds=120)
+    hass.states.async_set("light.kitchen", "on", timestamp=old_ts.timestamp())
+    await hass.async_block_till_done()
+
+    live = hass.states.get("light.kitchen")
+    assert live.last_changed == old_ts  # untouched: already older than grace
+
+
+async def test_unknown_recovery_also_triggers_repatch(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    """unknown is treated the same as unavailable - both are INVALID_STATES,
+    not just the more common of the two."""
+    stale = dt_util.utcnow() - timedelta(days=2)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"light.kitchen": {"s": "on", "t": stale.isoformat()}},
+    }
+    hass.states.async_set("light.kitchen", "on")
+    await _add_entry(hass)
+
+    hass.states.async_set("light.kitchen", "unknown")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
+
+    live = hass.states.get("light.kitchen")
+    assert live.last_changed == stale
+
+
+async def test_genuine_value_change_does_not_enter_reregister_burst(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """Regression: an ordinary value change (old_state present and valid,
+    genuinely different from new_state) must go through the incremental
+    listener, not the re-registration/recovery burst - it's real
+    information, not a reset artifact."""
+    hass.states.async_set("light.kitchen", "off")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+
+    assert job._reregister_burst == set()
+    assert job._reregister_flush_timer is None
 
 
 async def test_reregistration_retries_when_not_immediately_resolvable(
@@ -388,6 +494,29 @@ async def test_reregistration_burst_is_coalesced_into_one_batched_drain(
     # snapshot) -> each still gets its own retry ladder, same as before.
     for entity_id in entity_ids:
         assert entity_id in job._reregister_retry_timers
+
+
+async def test_entity_marked_unconfirmed_immediately_on_queueing(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """Regression: an entity must be _unconfirmed for the entire debounce
+    window, not just after a failed drain attempt - otherwise a snapshot
+    write racing in before the drain runs (e.g. HA shutting down
+    mid-debounce) would persist the raw reset artifact as if it were real.
+    """
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_remove("light.kitchen")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+
+    # Still inside the debounce window - not drained yet, but already
+    # unconfirmed.
+    assert "light.kitchen" in job._reregister_burst
+    assert "light.kitchen" in job._unconfirmed
 
 
 async def test_cleanup_if_done_does_not_tear_down_reregister_listener(

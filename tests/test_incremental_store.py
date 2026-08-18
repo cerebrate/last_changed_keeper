@@ -128,6 +128,36 @@ async def test_reregistration_event_not_merged_into_incremental_store(
     assert STORAGE_KEY not in hass_storage
 
 
+async def test_unavailable_recovery_not_merged_into_incremental_store(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    """Regression: recovering from unavailable/unknown resets last_changed
+    to "now" the same way a re-registration does (HA treats unavailable as
+    a distinct value), so it must be excluded here too - merging it would
+    write the raw reset artifact into the snapshot store as if it were a
+    real value change, poisoning it for the next boot. It's the
+    re-registration listener's job instead (see test_reregistration.py)."""
+    hass.states.async_set("light.kitchen", "on")
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_DOMAINS: ["light"], CONF_ENTITIES: []}
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    hass.states.async_set("light.kitchen", "unavailable")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=INCREMENTAL_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
+    assert STORAGE_KEY not in hass_storage
+
+
 async def test_unload_cancels_incremental_listener_and_flush_timer(
     recorder_mock, enable_custom_integrations, hass: HomeAssistant
 ) -> None:

@@ -21,13 +21,15 @@ attribute restored through a separate path (see _maybe_restore_last_triggered)
 and its own apply mechanism.
 
 Entities that get fully re-registered at runtime (a config entry reload, a
-Zigbee/Z-Wave device rejoining) are caught the same way a restart is, via a
-persistent listener (see _setup_reregister_listener) independent of the
-boot-time pending/listener machinery. Re-registrations are debounce-
-coalesced into a single batched drain (see _drain_reregister_burst) so a
-mass event — e.g. a hub's config entry reloading with hundreds of entities
-at once — costs a handful of bulk queries instead of one recorder query per
-entity.
+Zigbee/Z-Wave device rejoining) — or that merely recover from
+unavailable/unknown to a real value during normal runtime, e.g. a brief
+network/mesh blip — are caught the same way a restart is, via a persistent
+listener (see _setup_reregister_listener) independent of the boot-time
+pending/listener machinery. Both trigger conditions are debounce-coalesced
+into a single batched drain (see _drain_reregister_burst) so a mass event —
+e.g. a hub's config entry reloading with hundreds of entities at once, or a
+mesh-wide outage recovering — costs a handful of bulk queries instead of
+one recorder query per entity.
 
 Note: setting `last_changed`/`last_triggered` + invalidating the state cache
 uses internal HA structures. All accesses are defensively guarded; if the
@@ -1149,30 +1151,43 @@ class _RestoreJob:
     @callback
     def _setup_reregister_listener(self, targets: set[str]) -> None:
         """Persistent listener (entry lifetime, not just the boot pass) for
-        an already-watched entity being fully re-created (old_state is
-        None) after boot — e.g. its owning config entry reloads, or a
-        Zigbee/Z-Wave device rejoins — which resets last_changed to "now"
-        the same way a full HA restart does. Registered after boot has
-        already assigned every entity its initial state, so it never fires
-        for that initial assignment."""
+        an already-watched entity's last_changed getting reset to "now" by
+        something other than a full HA restart: either the entity being
+        fully re-created (old_state is None) — e.g. its owning config entry
+        reloads, or a Zigbee/Z-Wave device rejoins — or the entity recovering
+        from unavailable/unknown to a real value (a brief network/mesh
+        blip). HA's own state machine treats unavailable/unknown as a
+        distinct value, so recovering from it genuinely bumps last_changed
+        the same way a restart does, but unlike a restart nothing else in
+        this integration ever revisits that entity afterwards - the boot
+        pass only runs once at startup, and this was previously the only
+        listener, gated to old_state is None only. Left uncorrected, an
+        entity that flaps unavailable periodically during normal runtime
+        (common for Zigbee/Z-Wave/network devices) drifts wrong forever,
+        self-healing only at the next full restart. Registered after boot
+        has already assigned every entity its initial state, so it never
+        fires for that initial assignment."""
         self._unsub_reregister_listener = async_track_state_change_event(
             self.hass, list(targets), self._on_entity_reregistered
         )
 
     @callback
     def _on_entity_reregistered(self, event: Event) -> None:
-        """Queue a fresh re-registration for the batched drain below instead
-        of firing an immediate per-entity task: a mass re-registration (a
-        hub's config entry reloading with hundreds of entities, a Zigbee/
-        Z-Wave coordinator coming back after an outage) fires one such event
-        per entity, and reacting to each with its own recorder query is a
-        thundering herd on the recorder executor. See
+        """Queue a fresh re-registration or unavailable-recovery for the
+        batched drain below instead of firing an immediate per-entity task:
+        a mass event (a hub's config entry reloading with hundreds of
+        entities, a Zigbee/Z-Wave coordinator coming back after an outage)
+        fires one such event per entity, and reacting to each with its own
+        recorder query is a thundering herd on the recorder executor. See
         _drain_reregister_burst for the batched query itself.
         """
-        if event.data.get("old_state") is not None:
-            return  # not a full re-registration
+        old = event.data.get("old_state")
         new = event.data.get("new_state")
         if new is None or new.state in INVALID_STATES:
+            return
+        is_reregistration = old is None
+        is_unavailable_recovery = old is not None and old.state in INVALID_STATES
+        if not (is_reregistration or is_unavailable_recovery):
             return
         entity_id = new.entity_id
         if entity_id in self._pending:
@@ -1185,6 +1200,12 @@ class _RestoreJob:
         # timer must not fire mid-debounce-window against an entity that's
         # about to be re-patched anyway.
         self._cancel_reregister_retry(entity_id)
+        # Mark unconfirmed immediately, not just on a failed drain attempt:
+        # live.last_changed is the raw reset artifact for as long as this
+        # entity sits in the debounce window, and a snapshot write racing in
+        # during that window (e.g. HA shutting down mid-debounce) must not
+        # persist it as if it were real. _apply() clears this on success.
+        self._unconfirmed.add(entity_id)
         self._reregister_burst.add(entity_id)
         now = dt_util.utcnow()
         if self._reregister_burst_since is None:
@@ -1363,9 +1384,12 @@ class _RestoreJob:
         whole store on every single change (see async_write_snapshot).
 
         Restricted to genuine value transitions (old_state present and
-        actually different) — re-registrations (old_state is None, handled
-        by the re-registration listener above) and attribute-only "chatter"
-        (same state value, e.g. climate current_temperature) are ignored, so
+        actually different) — re-registrations (old_state is None) and
+        recoveries from unavailable/unknown (old_state.state in
+        INVALID_STATES) are both handled by the re-registration listener
+        above instead, since HA resets last_changed to "now" for those too
+        without the value having genuinely changed; attribute-only "chatter"
+        (same state value, e.g. climate current_temperature) is ignored so
         one noisy entity can't perpetually starve the debounce for others.
         """
         old = event.data.get("old_state")
@@ -1374,6 +1398,8 @@ class _RestoreJob:
             return
         if new.state in INVALID_STATES or old.state == new.state:
             return
+        if old.state in INVALID_STATES:
+            return  # recovery from unavailable/unknown, not a genuine change
         self._unconfirmed.discard(new.entity_id)
         self._dirty[new.entity_id] = {
             "s": new.state,
