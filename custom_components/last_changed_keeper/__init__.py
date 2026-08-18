@@ -859,8 +859,21 @@ class _RestoreJob:
         return run_patched
 
     async def _patch_all_pending(self, grace: float) -> int:
+        """Sweep every currently-pending entity once.
+
+        Snapshots _pending up front since entries are removed while this
+        loop runs — but the persistent listener's batched drain
+        (_drain_pending_recovery_burst) can also resolve and discard
+        entities concurrently (this coroutine yields control at every
+        await, including inside _patch_pending itself). Re-checking
+        membership right before each call — not just once at snapshot time
+        — skips entities a concurrent drain already resolved instead of
+        issuing a redundant recorder query for them.
+        """
         run_patched = 0
         for entity_id in list(self._pending):
+            if entity_id not in self._pending:
+                continue
             if await self._patch_pending(entity_id, grace):
                 run_patched += 1
         self.stats["patched_total"] = (
