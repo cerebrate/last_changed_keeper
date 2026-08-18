@@ -37,6 +37,7 @@ cache access fails, a repair issue is raised instead of crashing.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Iterable
@@ -1159,6 +1160,19 @@ class _RestoreJob:
         A failed batch yields an empty result but still yields its chunk, so
         those entities fall back to the snapshot/per-entity path in
         `_resolve` exactly as before instead of being skipped.
+
+        The trailing `asyncio.sleep(0)` after each batch paces the stream:
+        on a large "track all entities" install this loop can run for many
+        batches back to back, each one a synchronous query on the
+        recorder's own single-worker executor — without a yield point here,
+        our own coroutine is immediately ready again the instant one batch's
+        executor job resolves, which can keep crowding out other ready
+        callbacks on the main event loop for the whole pass. `sleep(0)` is a
+        pure yield with no added delay (unlike `sleep(n>0)`), so pacing this
+        way costs nothing in wall-clock time — it only gives other
+        already-ready work a fair turn between batches, shared by every
+        caller of this generator (the boot pass, verify, and the
+        re-registration/pending-recovery burst drains alike).
         """
         start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
         batch_size = self._bulk_batch_size
@@ -1176,6 +1190,7 @@ class _RestoreJob:
                 result = {}
             yield chunk, result
             result = {}
+            await asyncio.sleep(0)
 
     # ----- Applying ------------------------------------------------------
 

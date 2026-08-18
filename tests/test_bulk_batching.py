@@ -164,6 +164,37 @@ async def test_bulk_batches_use_configured_batch_size(
     assert set(delivered) == set(ids)
 
 
+async def test_iter_bulk_batches_paces_with_a_zero_delay_sleep_between_batches(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Regression (P4.1): a long streamed pass over many batches must yield
+    to the event loop between them - via a zero-delay asyncio.sleep(0), not
+    a real delay - instead of immediately queuing the next batch's recorder
+    executor job, so other pending work gets a fair turn."""
+    monkeypatch.setattr(lck, "_bulk_query", lambda _h, _s, ids: {i: [] for i in ids})
+    monkeypatch.setattr(lck, "BULK_BATCH_SIZE", 2)
+
+    sleeps: list[float] = []
+    original_sleep = lck.asyncio.sleep
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr(lck.asyncio, "sleep", fake_sleep)
+
+    job = _make_job(hass)
+    ids = [f"light.l{i}" for i in range(5)]
+    batch_count = 0
+    async for _chunk, _result in job._iter_bulk_batches(ids):
+        batch_count += 1
+
+    assert batch_count == 3  # 2 + 2 + 1, matching BULK_BATCH_SIZE
+    # One pacing yield per batch, all zero-delay - a long pass costs nothing
+    # extra in wall-clock time.
+    assert sleeps == [0] * batch_count
+
+
 async def test_bulk_batch_size_falls_back_to_default_when_invalid(
     recorder_mock, hass: HomeAssistant
 ) -> None:
