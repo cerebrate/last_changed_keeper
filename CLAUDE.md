@@ -100,10 +100,20 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
 set up once from `_async_run_impl`:**
 - `_setup_reregister_listener` — an already-watched entity that fully
   disappears and reappears later (config entry reload, device rejoin) gets
-  the same "now" reset a restart causes; this re-patches just that entity,
-  independent of the boot pending/listener machinery (`_stop_boot_machinery`
-  vs. the full `shutdown()` intentionally only tears down the boot-specific
-  half).
+  the same "now" reset a restart causes; this re-patches it, independent of
+  the boot pending/listener machinery (`_stop_boot_machinery` vs. the full
+  `shutdown()` intentionally only tears down the boot-specific half).
+  Individual re-registration events are debounce-coalesced
+  (`REREGISTER_DEBOUNCE_SECONDS`, capped by `REREGISTER_MAX_WAIT_SECONDS`)
+  into a burst set and drained together by `_drain_reregister_burst`, which
+  reuses the same streaming bulk-query machinery as the boot pass
+  (`_iter_bulk_batches`) rather than issuing one targeted recorder query per
+  entity — otherwise a mass re-registration (a hub's config entry reloading
+  with hundreds of entities, a coordinator reconnecting after an outage)
+  would fire one recorder query per entity all at once. Entities the drain
+  can't resolve still fall back to the existing per-entity retry ladder
+  (`_attempt_reregister_patch` / `RETRY_DELAYS`), which stays untouched since
+  retries are already spread out in time and aren't the burst risk.
 - `_setup_incremental_listener` — every genuine value change of a watched
   entity is debounce-merged (`INCREMENTAL_DEBOUNCE_SECONDS`, capped by
   `INCREMENTAL_MAX_WAIT_SECONDS`) into the same store used for the periodic/

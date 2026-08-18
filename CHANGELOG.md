@@ -2,6 +2,37 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.6] — 2026-08-18
+### Changed
+- **Runtime re-registrations (a config entry reload, a Zigbee/Z-Wave device
+  or coordinator rejoining) are now coalesced into a single batched drain
+  instead of firing one recorder query per entity.** Previously, every
+  re-registration event immediately spawned its own task, and each task ran
+  its own targeted, per-entity recorder query
+  (`_attempt_reregister_patch`). A mass re-registration — a hub's config
+  entry reloading with hundreds of entities at once, or a coordinator
+  reconnecting after an outage and re-registering everything it owns —
+  therefore fired hundreds of concurrent tasks, each issuing its own
+  recorder query: a thundering herd on the recorder executor with no
+  batching at all, unlike the boot pass (which has used a streamed bulk
+  query since 0.9.4).
+
+  Re-registrations are now debounce-coalesced (`REREGISTER_DEBOUNCE_SECONDS`,
+  capped by `REREGISTER_MAX_WAIT_SECONDS` for a continuously-arriving burst,
+  the same debounce/max-wait shape already used for the incremental
+  store) into a burst set, then drained together via
+  `_drain_reregister_burst` — which reuses the boot pass's streaming bulk
+  query machinery (`_iter_bulk_batches`) instead of querying one entity at a
+  time. A mass re-registration now costs a handful of batched queries
+  (bounded by `bulk_batch_size`) instead of one query per entity.
+
+  Entities that don't resolve from the batched drain still get the same
+  per-entity retry ladder as before (`retry_delays`) — retries are already
+  spread out in time and aren't the source of the thundering-herd risk, so
+  that path is unchanged. A single, isolated re-registration (the common
+  case) still resolves quickly; it just now waits out the short debounce
+  window first rather than being patched on the very next event loop tick.
+
 ## [0.9.5] — 2026-08-17
 ### Fixed
 - **The snapshot store could get permanently poisoned with a restart
