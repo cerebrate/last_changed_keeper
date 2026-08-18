@@ -21,9 +21,15 @@ attribute restored through a separate path (see _maybe_restore_last_triggered)
 and its own apply mechanism.
 
 Entities that get fully re-registered at runtime (a config entry reload, a
-Zigbee/Z-Wave device rejoining) are caught the same way a restart is, via a
-persistent listener (see _setup_reregister_listener) independent of the
-boot-time pending/listener machinery.
+Zigbee/Z-Wave device rejoining) — or that merely recover from
+unavailable/unknown to a real value during normal runtime, e.g. a brief
+network/mesh blip — are caught the same way a restart is, via a persistent
+listener (see _setup_reregister_listener) independent of the boot-time
+pending/listener machinery. Both trigger conditions are debounce-coalesced
+into a single batched drain (see _drain_reregister_burst) so a mass event —
+e.g. a hub's config entry reloading with hundreds of entities at once, or a
+mesh-wide outage recovering — costs a handful of bulk queries instead of
+one recorder query per entity.
 
 Note: setting `last_changed`/`last_triggered` + invalidating the state cache
 uses internal HA structures. All accesses are defensively guarded; if the
@@ -31,6 +37,7 @@ cache access fails, a repair issue is raised instead of crashing.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Iterable
@@ -117,7 +124,11 @@ from .const import (
     LAST_TRIGGERED_DOMAINS,
     MARGIN_SECONDS,
     MAX_RUN_HISTORY,
+    PENDING_RECOVERY_DEBOUNCE_SECONDS,
+    PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
+    REREGISTER_DEBOUNCE_SECONDS,
+    REREGISTER_MAX_WAIT_SECONDS,
     RETRY_DELAYS,
     SERVICE_RESTORE_NOW,
     SERVICE_VERIFY,
@@ -309,6 +320,13 @@ class _RestoreJob:
         self._startup = dt_util.utcnow()
         self._unsub_listener: CALLBACK_TYPE | None = None
         self._unsub_timers: list[CALLBACK_TYPE] = []
+        # Debounce-coalesced burst of pending entities recovering from
+        # unavailable during the boot window, drained together via
+        # _drain_pending_recovery_burst instead of one recorder query per
+        # entity — see _on_pending_entity_recovered.
+        self._pending_recovery_burst: set[str] = set()
+        self._pending_recovery_burst_since: datetime | None = None
+        self._pending_recovery_flush_timer: CALLBACK_TYPE | None = None
         self._degraded = False
         self._also_updated = False
         self._also_restore_triggered = False
@@ -332,6 +350,12 @@ class _RestoreJob:
         # ----- Feature: re-patch on runtime re-registration ---------------
         self._unsub_reregister_listener: CALLBACK_TYPE | None = None
         self._reregister_retry_timers: dict[str, list[CALLBACK_TYPE]] = {}
+        # Debounce-coalesced burst of pending re-registrations, drained
+        # together via _drain_reregister_burst instead of one recorder query
+        # per entity — see _on_entity_reregistered.
+        self._reregister_burst: set[str] = set()
+        self._reregister_burst_since: datetime | None = None
+        self._reregister_flush_timer: CALLBACK_TYPE | None = None
 
         # ----- Feature: incremental runtime store --------------------------
         self._unsub_incremental_listener: CALLBACK_TYPE | None = None
@@ -429,6 +453,9 @@ class _RestoreJob:
         self._stop_boot_machinery()
         self._stop_reregister_listener()
         self._cancel_all_reregister_retries()
+        self._cancel_reregister_flush_timer()
+        self._reregister_burst.clear()
+        self._reregister_burst_since = None
         self._stop_incremental_listener()
         self._cancel_flush_timer()
         self._dirty.clear()
@@ -450,12 +477,21 @@ class _RestoreJob:
         for cancel in self._unsub_timers:
             cancel()
         self._unsub_timers.clear()
+        self._cancel_pending_recovery_flush_timer()
+        self._pending_recovery_burst.clear()
+        self._pending_recovery_burst_since = None
 
     @callback
     def _stop_listener(self) -> None:
         if self._unsub_listener is not None:
             self._unsub_listener()
             self._unsub_listener = None
+
+    @callback
+    def _cancel_pending_recovery_flush_timer(self) -> None:
+        if self._pending_recovery_flush_timer is not None:
+            self._pending_recovery_flush_timer()
+            self._pending_recovery_flush_timer = None
 
     @callback
     def _stop_reregister_listener(self) -> None:
@@ -469,6 +505,12 @@ class _RestoreJob:
             for cancel in timers:
                 cancel()
         self._reregister_retry_timers.clear()
+
+    @callback
+    def _cancel_reregister_flush_timer(self) -> None:
+        if self._reregister_flush_timer is not None:
+            self._reregister_flush_timer()
+            self._reregister_flush_timer = None
 
     @callback
     def _stop_incremental_listener(self) -> None:
@@ -684,7 +726,15 @@ class _RestoreJob:
 
     @callback
     def _setup_listener(self, grace: float) -> None:
-        """Listen for unavailable→real transitions of the pending entities."""
+        """Listen for unavailable→real transitions of the pending entities.
+
+        Individual transitions are debounce-coalesced into a burst set and
+        drained together via _drain_pending_recovery_burst, instead of
+        firing one recorder query per entity — a mass unavailable→real
+        transition early in boot (a Zigbee/Z-Wave mesh finishing formation
+        and announcing many devices within the same few seconds) would
+        otherwise be a thundering herd on the recorder executor.
+        """
 
         @callback
         def _on_change(event: Event) -> None:
@@ -701,11 +751,81 @@ class _RestoreJob:
                 self._pending.discard(entity_id)
                 self._cleanup_if_done()
                 return
-            self.hass.async_create_task(self._patch_pending(entity_id, grace))
+            self._pending_recovery_burst.add(entity_id)
+            now = dt_util.utcnow()
+            if self._pending_recovery_burst_since is None:
+                self._pending_recovery_burst_since = now
+            self._cancel_pending_recovery_flush_timer()
+            elapsed = (now - self._pending_recovery_burst_since).total_seconds()
+            if elapsed >= PENDING_RECOVERY_MAX_WAIT_SECONDS:
+                self._flush_pending_recovery_burst()
+            else:
+                self._pending_recovery_flush_timer = async_call_later(
+                    self.hass,
+                    PENDING_RECOVERY_DEBOUNCE_SECONDS,
+                    self._flush_pending_recovery_burst,
+                )
 
         self._unsub_listener = async_track_state_change_event(
             self.hass, list(self._pending), _on_change
         )
+
+    @callback
+    def _flush_pending_recovery_burst(self, _now: datetime | None = None) -> None:
+        self._cancel_pending_recovery_flush_timer()
+        self._pending_recovery_burst_since = None
+        if not self._pending_recovery_burst:
+            return
+        burst, self._pending_recovery_burst = self._pending_recovery_burst, set()
+        self.hass.async_create_task(self._drain_pending_recovery_burst(burst))
+
+    async def _drain_pending_recovery_burst(self, entity_ids: set[str]) -> None:
+        """Batched replacement for one recorder query per boot-pending
+        entity recovering from unavailable: resolves the whole debounced
+        burst together via the same streaming bulk-query machinery the
+        boot pass uses (_iter_bulk_batches), instead of each firing its own
+        targeted per-entity query (_patch_pending, which — like
+        _attempt_reregister_patch — only ever sees the raw, undeduplicated
+        deep query since it always passes bulk_states=None).
+
+        Entities that don't resolve here are simply left in _pending:
+        unlike the re-registration burst there is no separate per-entity
+        retry ladder to arm here — the existing scheduled retry passes
+        (_schedule_retries / _patch_all_pending) already re-sweep the whole
+        remaining pending set.
+        """
+        candidates: list[str] = []
+        candidate_last_changed: dict[str, datetime] = {}
+        for entity_id in entity_ids:
+            if entity_id not in self._pending:
+                continue  # already resolved by a scheduled retry pass meanwhile
+            live = self.hass.states.get(entity_id)
+            if live is None or live.state in INVALID_STATES:
+                continue
+            candidates.append(entity_id)
+            candidate_last_changed[entity_id] = live.last_changed
+
+        async for chunk, bulk in self._iter_bulk_batches(candidates):
+            for entity_id in chunk:
+                # Re-validate against the snapshot taken above: the bulk
+                # query just awaited the recorder executor, during which the
+                # entity may have gone unavailable again, genuinely changed,
+                # or already been resolved by a scheduled retry pass — see
+                # the matching comment in _async_run_impl.
+                if entity_id not in self._pending:
+                    continue
+                live = self.hass.states.get(entity_id)
+                if live is None or live.state in INVALID_STATES:
+                    continue
+                if live.last_changed != candidate_last_changed[entity_id]:
+                    continue
+                await self._maybe_restore_last_triggered(entity_id)
+                ts = await self._resolve(entity_id, live, bulk.get(entity_id))
+                if ts is not None:
+                    self._apply(live, ts, entity_id)
+                    self._pending.discard(entity_id)
+                    self._cleanup_if_done()
+            del bulk  # released before the next batch is fetched
 
     @callback
     def _schedule_retries(self, grace: float) -> None:
@@ -740,8 +860,21 @@ class _RestoreJob:
         return run_patched
 
     async def _patch_all_pending(self, grace: float) -> int:
+        """Sweep every currently-pending entity once.
+
+        Snapshots _pending up front since entries are removed while this
+        loop runs — but the persistent listener's batched drain
+        (_drain_pending_recovery_burst) can also resolve and discard
+        entities concurrently (this coroutine yields control at every
+        await, including inside _patch_pending itself). Re-checking
+        membership right before each call — not just once at snapshot time
+        — skips entities a concurrent drain already resolved instead of
+        issuing a redundant recorder query for them.
+        """
         run_patched = 0
         for entity_id in list(self._pending):
+            if entity_id not in self._pending:
+                continue
             if await self._patch_pending(entity_id, grace):
                 run_patched += 1
         self.stats["patched_total"] = (
@@ -1027,6 +1160,19 @@ class _RestoreJob:
         A failed batch yields an empty result but still yields its chunk, so
         those entities fall back to the snapshot/per-entity path in
         `_resolve` exactly as before instead of being skipped.
+
+        The trailing `asyncio.sleep(0)` after each batch paces the stream:
+        on a large "track all entities" install this loop can run for many
+        batches back to back, each one a synchronous query on the
+        recorder's own single-worker executor — without a yield point here,
+        our own coroutine is immediately ready again the instant one batch's
+        executor job resolves, which can keep crowding out other ready
+        callbacks on the main event loop for the whole pass. `sleep(0)` is a
+        pure yield with no added delay (unlike `sleep(n>0)`), so pacing this
+        way costs nothing in wall-clock time — it only gives other
+        already-ready work a fair turn between batches, shared by every
+        caller of this generator (the boot pass, verify, and the
+        re-registration/pending-recovery burst drains alike).
         """
         start = dt_util.utcnow() - timedelta(days=BULK_WINDOW_DAYS)
         batch_size = self._bulk_batch_size
@@ -1044,6 +1190,7 @@ class _RestoreJob:
                 result = {}
             yield chunk, result
             result = {}
+            await asyncio.sleep(0)
 
     # ----- Applying ------------------------------------------------------
 
@@ -1128,22 +1275,43 @@ class _RestoreJob:
     @callback
     def _setup_reregister_listener(self, targets: set[str]) -> None:
         """Persistent listener (entry lifetime, not just the boot pass) for
-        an already-watched entity being fully re-created (old_state is
-        None) after boot — e.g. its owning config entry reloads, or a
-        Zigbee/Z-Wave device rejoins — which resets last_changed to "now"
-        the same way a full HA restart does. Registered after boot has
-        already assigned every entity its initial state, so it never fires
-        for that initial assignment."""
+        an already-watched entity's last_changed getting reset to "now" by
+        something other than a full HA restart: either the entity being
+        fully re-created (old_state is None) — e.g. its owning config entry
+        reloads, or a Zigbee/Z-Wave device rejoins — or the entity recovering
+        from unavailable/unknown to a real value (a brief network/mesh
+        blip). HA's own state machine treats unavailable/unknown as a
+        distinct value, so recovering from it genuinely bumps last_changed
+        the same way a restart does, but unlike a restart nothing else in
+        this integration ever revisits that entity afterwards - the boot
+        pass only runs once at startup, and this was previously the only
+        listener, gated to old_state is None only. Left uncorrected, an
+        entity that flaps unavailable periodically during normal runtime
+        (common for Zigbee/Z-Wave/network devices) drifts wrong forever,
+        self-healing only at the next full restart. Registered after boot
+        has already assigned every entity its initial state, so it never
+        fires for that initial assignment."""
         self._unsub_reregister_listener = async_track_state_change_event(
             self.hass, list(targets), self._on_entity_reregistered
         )
 
     @callback
     def _on_entity_reregistered(self, event: Event) -> None:
-        if event.data.get("old_state") is not None:
-            return  # not a full re-registration
+        """Queue a fresh re-registration or unavailable-recovery for the
+        batched drain below instead of firing an immediate per-entity task:
+        a mass event (a hub's config entry reloading with hundreds of
+        entities, a Zigbee/Z-Wave coordinator coming back after an outage)
+        fires one such event per entity, and reacting to each with its own
+        recorder query is a thundering herd on the recorder executor. See
+        _drain_reregister_burst for the batched query itself.
+        """
+        old = event.data.get("old_state")
         new = event.data.get("new_state")
         if new is None or new.state in INVALID_STATES:
+            return
+        is_reregistration = old is None
+        is_unavailable_recovery = old is not None and old.state in INVALID_STATES
+        if not (is_reregistration or is_unavailable_recovery):
             return
         entity_id = new.entity_id
         if entity_id in self._pending:
@@ -1151,38 +1319,106 @@ class _RestoreJob:
         _, _, _, grace, _, _ = self._config
         if (dt_util.utcnow() - new.last_changed).total_seconds() > grace:
             return
-        self.hass.async_create_task(self._patch_reregistered(entity_id, grace))
-
-    async def _patch_reregistered(self, entity_id: str, grace: float) -> bool:
-        """Entry point for a fresh re-registration event: drops any retries
-        still scheduled from a previous flap of the same entity, makes one
-        attempt right away, and — only here — arms the retry ladder if that
-        attempt resolved nothing.
-
-        Arming the ladder exclusively at this single entry point is what
-        bounds the retry count: the timers themselves run
-        _attempt_reregister_patch, which never schedules, so one
-        re-registration can only ever produce len(retry_delays) retries.
-        """
+        # Drop any retry ladder still armed from a previous flap of this
+        # entity right away, rather than waiting for the drain — a stale
+        # timer must not fire mid-debounce-window against an entity that's
+        # about to be re-patched anyway.
         self._cancel_reregister_retry(entity_id)
-        result = await self._attempt_reregister_patch(entity_id, grace)
-        if result is _RETRY_WORTHWHILE:
-            self._schedule_reregister_retries(entity_id, grace)
-        return result is True
+        # Mark unconfirmed immediately, not just on a failed drain attempt:
+        # live.last_changed is the raw reset artifact for as long as this
+        # entity sits in the debounce window, and a snapshot write racing in
+        # during that window (e.g. HA shutting down mid-debounce) must not
+        # persist it as if it were real. _apply() clears this on success.
+        self._unconfirmed.add(entity_id)
+        self._reregister_burst.add(entity_id)
+        now = dt_util.utcnow()
+        if self._reregister_burst_since is None:
+            self._reregister_burst_since = now
+        self._cancel_reregister_flush_timer()
+        elapsed = (now - self._reregister_burst_since).total_seconds()
+        if elapsed >= REREGISTER_MAX_WAIT_SECONDS:
+            self._flush_reregister_burst()
+        else:
+            self._reregister_flush_timer = async_call_later(
+                self.hass, REREGISTER_DEBOUNCE_SECONDS, self._flush_reregister_burst
+            )
+
+    @callback
+    def _flush_reregister_burst(self, _now: datetime | None = None) -> None:
+        self._cancel_reregister_flush_timer()
+        self._reregister_burst_since = None
+        if not self._reregister_burst:
+            return
+        burst, self._reregister_burst = self._reregister_burst, set()
+        self.hass.async_create_task(self._drain_reregister_burst(burst))
+
+    async def _drain_reregister_burst(self, entity_ids: set[str]) -> None:
+        """Batched replacement for one recorder query per re-registered
+        entity: resolves the whole debounced burst together through the same
+        streaming bulk-query machinery the boot pass uses
+        (_iter_bulk_batches), so a mass re-registration costs a handful of
+        batched queries instead of one targeted query per entity.
+
+        Mirrors _async_run_impl's candidate/re-validate loop rather than
+        reusing _attempt_reregister_patch, since that helper always queries
+        one entity at a time (it also serves the retry ladder below, where
+        that is the right shape — retries are already spread across
+        RETRY_DELAYS, not bursty). Entities that don't resolve here still get
+        the same retry ladder as before.
+        """
+        _, _, _, grace, _, _ = self._config
+        candidates: list[str] = []
+        candidate_last_changed: dict[str, datetime] = {}
+        for entity_id in entity_ids:
+            live = self.hass.states.get(entity_id)
+            if live is None or live.state in INVALID_STATES:
+                continue
+            if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
+                continue
+            candidates.append(entity_id)
+            candidate_last_changed[entity_id] = live.last_changed
+
+        async for chunk, bulk in self._iter_bulk_batches(candidates):
+            for entity_id in chunk:
+                # Re-validate against the snapshot taken above: the bulk
+                # query just awaited the recorder executor, during which the
+                # entity may have gone unavailable or genuinely changed for
+                # real — see the matching comment in _async_run_impl.
+                live = self.hass.states.get(entity_id)
+                if live is None or live.state in INVALID_STATES:
+                    continue
+                if live.last_changed != candidate_last_changed[entity_id]:
+                    self._unconfirmed.discard(entity_id)
+                    continue
+                await self._maybe_restore_last_triggered(entity_id)
+                ts = await self._resolve(entity_id, live, bulk.get(entity_id))
+                if ts is not None:
+                    self._apply(live, ts, entity_id)
+                    _LOGGER.debug(
+                        "%s: re-patched after runtime re-registration", entity_id
+                    )
+                else:
+                    # Unresolved: live.last_changed is still this
+                    # re-registration's raw reset value — see _unconfirmed.
+                    self._unconfirmed.add(entity_id)
+                    self._schedule_reregister_retries(entity_id, grace)
+            del bulk  # released before the next batch is fetched
 
     async def _attempt_reregister_patch(
         self, entity_id: str, grace: float
     ) -> bool | None:
         """One targeted, per-entity re-patch attempt (no bulk query — this
-        is for a single entity, not a full boot pass). Also attempts the
+        is for a single entity, not a full burst drain). Also attempts the
         last_triggered path. Respects the same grace window as the boot pass.
 
         Deliberately free of scheduling side effects: it must never arm
-        retries itself. It runs both as the first attempt (from
-        _patch_reregistered) and as *every* retry attempt, so scheduling
-        here would let each failing retry arm a fresh ladder — the number of
-        attempts would then grow by a factor of len(retry_delays) per round
-        instead of being capped at one ladder per re-registration.
+        retries itself. It runs as every retry-ladder attempt (see
+        _retry_reregister), so scheduling here would let each failing retry
+        arm a fresh ladder — the number of attempts would then grow by a
+        factor of len(retry_delays) per round instead of being capped at one
+        ladder per re-registration. (The initial attempt, by contrast, goes
+        through the batched _drain_reregister_burst above, which arms the
+        ladder itself exactly once per unresolved entity.)
 
         Returns True when patched, False (_RETRY_WORTHWHILE) when the entity
         is a valid candidate that simply could not be resolved right now, and
@@ -1272,9 +1508,12 @@ class _RestoreJob:
         whole store on every single change (see async_write_snapshot).
 
         Restricted to genuine value transitions (old_state present and
-        actually different) — re-registrations (old_state is None, handled
-        by the re-registration listener above) and attribute-only "chatter"
-        (same state value, e.g. climate current_temperature) are ignored, so
+        actually different) — re-registrations (old_state is None) and
+        recoveries from unavailable/unknown (old_state.state in
+        INVALID_STATES) are both handled by the re-registration listener
+        above instead, since HA resets last_changed to "now" for those too
+        without the value having genuinely changed; attribute-only "chatter"
+        (same state value, e.g. climate current_temperature) is ignored so
         one noisy entity can't perpetually starve the debounce for others.
         """
         old = event.data.get("old_state")
@@ -1283,6 +1522,8 @@ class _RestoreJob:
             return
         if new.state in INVALID_STATES or old.state == new.state:
             return
+        if old.state in INVALID_STATES:
+            return  # recovery from unavailable/unknown, not a genuine change
         self._unconfirmed.discard(new.entity_id)
         self._dirty[new.entity_id] = {
             "s": new.state,

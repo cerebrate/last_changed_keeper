@@ -1,9 +1,11 @@
-"""Tests for the runtime re-registration path: an already-watched entity
-that gets fully re-created (e.g. its owning config entry reloads, or a
-Zigbee/Z-Wave device rejoins) resets last_changed to "now" the same way a
-full HA restart does. A persistent, entry-lifetime listener (independent of
-the boot-time pending/listener machinery) catches this and re-patches just
-that one entity, respecting the same grace window and retry_delays.
+"""Tests for the runtime re-registration / unavailable-recovery path: an
+already-watched entity that gets fully re-created (e.g. its owning config
+entry reloads, or a Zigbee/Z-Wave device rejoins), or that merely recovers
+from unavailable/unknown to a real value during normal runtime (a brief
+network/mesh blip), resets last_changed to "now" the same way a full HA
+restart does. A persistent, entry-lifetime listener (independent of the
+boot-time pending/listener machinery) catches both cases and re-patches the
+entity, respecting the same grace window and retry_delays.
 """
 from __future__ import annotations
 
@@ -21,9 +23,19 @@ from custom_components.last_changed_keeper.const import (
     CONF_DOMAINS,
     CONF_ENTITIES,
     DOMAIN,
+    REREGISTER_DEBOUNCE_SECONDS,
     RETRY_DELAYS,
     STORAGE_KEY,
 )
+
+
+async def _flush_reregister_burst(hass: HomeAssistant) -> None:
+    """Advance past the re-registration debounce so the batched drain (see
+    _drain_reregister_burst) runs, then let its recorder query settle."""
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=REREGISTER_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
 
 
 async def _add_entry(hass: HomeAssistant) -> MockConfigEntry:
@@ -61,6 +73,7 @@ async def test_reregistration_patches_from_snapshot(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
 
     live = hass.states.get("light.kitchen")
     assert live.last_changed == stale
@@ -97,6 +110,110 @@ async def test_reregistration_ignored_when_grace_exceeded(
     assert live.last_changed == old_ts  # untouched: already older than grace
 
 
+# ----- Recovery from unavailable/unknown ------------------------------------
+
+
+async def test_unavailable_recovery_patches_from_snapshot(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    """A device that flaps unavailable and recovers to the same value during
+    normal runtime (not a restart, not a full re-registration) resets
+    last_changed the same way HA treats any other value change - this must
+    be caught and re-patched exactly like a re-registration is."""
+    stale = dt_util.utcnow() - timedelta(days=2)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"light.kitchen": {"s": "on", "t": stale.isoformat()}},
+    }
+    hass.states.async_set("light.kitchen", "on")
+    await _add_entry(hass)
+
+    # Simulate a brief network/mesh blip: the entity goes unavailable and
+    # recovers to the SAME real value, without ever being fully removed.
+    hass.states.async_set("light.kitchen", "unavailable")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
+
+    live = hass.states.get("light.kitchen")
+    assert live.last_changed == stale
+
+
+async def test_unavailable_recovery_ignored_when_grace_exceeded(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    stale = dt_util.utcnow() - timedelta(days=2)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"light.kitchen": {"s": "on", "t": stale.isoformat()}},
+    }
+    hass.states.async_set("light.kitchen", "on")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_DOMAINS: ["light"], CONF_ENTITIES: [], "grace_seconds": 60},
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    hass.states.async_set("light.kitchen", "unavailable")
+    await hass.async_block_till_done()
+    old_ts = dt_util.utcnow() - timedelta(seconds=120)
+    hass.states.async_set("light.kitchen", "on", timestamp=old_ts.timestamp())
+    await hass.async_block_till_done()
+
+    live = hass.states.get("light.kitchen")
+    assert live.last_changed == old_ts  # untouched: already older than grace
+
+
+async def test_unknown_recovery_also_triggers_repatch(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    """unknown is treated the same as unavailable - both are INVALID_STATES,
+    not just the more common of the two."""
+    stale = dt_util.utcnow() - timedelta(days=2)
+    hass_storage[STORAGE_KEY] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": STORAGE_KEY,
+        "data": {"light.kitchen": {"s": "on", "t": stale.isoformat()}},
+    }
+    hass.states.async_set("light.kitchen", "on")
+    await _add_entry(hass)
+
+    hass.states.async_set("light.kitchen", "unknown")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
+
+    live = hass.states.get("light.kitchen")
+    assert live.last_changed == stale
+
+
+async def test_genuine_value_change_does_not_enter_reregister_burst(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """Regression: an ordinary value change (old_state present and valid,
+    genuinely different from new_state) must go through the incremental
+    listener, not the re-registration/recovery burst - it's real
+    information, not a reset artifact."""
+    hass.states.async_set("light.kitchen", "off")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+
+    assert job._reregister_burst == set()
+    assert job._reregister_flush_timer is None
+
+
 async def test_reregistration_retries_when_not_immediately_resolvable(
     recorder_mock, enable_custom_integrations, hass: HomeAssistant
 ) -> None:
@@ -108,6 +225,7 @@ async def test_reregistration_retries_when_not_immediately_resolvable(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
 
     # Nothing resolvable yet (no recorder history, no snapshot) -> retry
     # timers scheduled for this entity instead of giving up immediately.
@@ -156,8 +274,10 @@ async def test_reregistration_retry_ladder_does_not_grow_on_repeated_failure(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
 
-    # Nothing resolvable -> the first attempt failed and armed one ladder.
+    # Nothing resolvable -> the first attempt (via the batched drain, not
+    # _attempt_reregister_patch - see below) failed and armed one ladder.
     assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
 
     # Drive every rung while the entity stays unresolvable. The ladder must
@@ -169,8 +289,11 @@ async def test_reregistration_retry_ladder_does_not_grow_on_repeated_failure(
         armed = job._reregister_retry_timers.get("light.kitchen", [])
         assert len(armed) <= len(RETRY_DELAYS)
 
-    # Exactly one initial attempt plus one per retry delay - not a multiple.
-    assert len(attempts) == 1 + len(RETRY_DELAYS)
+    # One attempt per retry delay - not a multiple. The initial attempt goes
+    # through the batched drain (_drain_reregister_burst), which calls
+    # _resolve directly rather than _attempt_reregister_patch, so it isn't
+    # counted here - only the retry ladder is.
+    assert len(attempts) == len(RETRY_DELAYS)
     # Ladder exhausted: the entry is pruned rather than left behind holding
     # already-fired timers (one stale entry per entity, forever, otherwise).
     assert "light.kitchen" not in job._reregister_retry_timers
@@ -220,6 +343,7 @@ async def test_successful_retry_cancels_the_rest_of_the_ladder(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
     assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
 
     stale = dt_util.utcnow() - timedelta(days=1)
@@ -248,6 +372,7 @@ async def test_new_reregistration_replaces_armed_ladder(
         await hass.async_block_till_done()
         hass.states.async_set("light.kitchen", "on")
         await hass.async_block_till_done()
+        await _flush_reregister_burst(hass)
         assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
 
 
@@ -281,6 +406,7 @@ async def test_unload_cancels_reregister_listener_and_retries(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
     assert "light.kitchen" in job._reregister_retry_timers
 
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -288,6 +414,109 @@ async def test_unload_cancels_reregister_listener_and_retries(
 
     assert job._unsub_reregister_listener is None
     assert job._reregister_retry_timers == {}
+
+
+async def test_unload_cancels_pending_reregister_burst(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """A re-registration still sitting in the debounce window at unload
+    time must not fire its drain afterwards against a torn-down job."""
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_remove("light.kitchen")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    assert "light.kitchen" in job._reregister_burst
+    assert job._reregister_flush_timer is not None
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert job._reregister_burst == set()
+    assert job._reregister_flush_timer is None
+
+    # The timer that would have flushed the burst must be well and truly
+    # cancelled, not just forgotten about - fire time forward past it and
+    # confirm nothing blows up trying to act on a torn-down job.
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=REREGISTER_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
+
+async def test_reregistration_burst_is_coalesced_into_one_batched_drain(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Regression: a burst of re-registrations arriving close together (a
+    hub's config entry reloading with several entities at once) must be
+    coalesced into a single batched drain instead of firing one recorder
+    query per entity - see _drain_reregister_burst.
+    """
+    import custom_components.last_changed_keeper as lck
+
+    entity_ids = [f"light.bulb_{i}" for i in range(5)]
+    for entity_id in entity_ids:
+        hass.states.async_set(entity_id, "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    calls: list[list[str]] = []
+
+    def fake_bulk_query(_hass, _start, chunk):
+        calls.append(list(chunk))
+        return {}
+
+    monkeypatch.setattr(lck, "_bulk_query", fake_bulk_query)
+
+    for entity_id in entity_ids:
+        hass.states.async_remove(entity_id)
+        await hass.async_block_till_done()
+        hass.states.async_set(entity_id, "on")
+        await hass.async_block_till_done()
+
+    # All five re-registered within the debounce window -> queued together,
+    # not yet drained (and no recorder query issued yet).
+    assert job._reregister_burst == set(entity_ids)
+    assert calls == []
+
+    await _flush_reregister_burst(hass)
+
+    # One batched recorder query covering every entity in the burst, not
+    # five separate ones.
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(entity_ids)
+    assert job._reregister_burst == set()
+
+    # None of them were resolvable (fake query returns nothing, no
+    # snapshot) -> each still gets its own retry ladder, same as before.
+    for entity_id in entity_ids:
+        assert entity_id in job._reregister_retry_timers
+
+
+async def test_entity_marked_unconfirmed_immediately_on_queueing(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """Regression: an entity must be _unconfirmed for the entire debounce
+    window, not just after a failed drain attempt - otherwise a snapshot
+    write racing in before the drain runs (e.g. HA shutting down
+    mid-debounce) would persist the raw reset artifact as if it were real.
+    """
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_remove("light.kitchen")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+
+    # Still inside the debounce window - not drained yet, but already
+    # unconfirmed.
+    assert "light.kitchen" in job._reregister_burst
+    assert "light.kitchen" in job._unconfirmed
 
 
 async def test_cleanup_if_done_does_not_tear_down_reregister_listener(

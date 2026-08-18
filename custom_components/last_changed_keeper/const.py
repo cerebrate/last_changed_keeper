@@ -44,6 +44,39 @@ INCREMENTAL_DEBOUNCE_SECONDS = 8
 # fully starve the incremental store.
 INCREMENTAL_MAX_WAIT_SECONDS = 30
 
+# Debounce for the re-registration burst drain (see _on_entity_reregistered /
+# _drain_reregister_burst): a mass re-registration (a hub's config entry
+# reloading with hundreds of entities, a Zigbee/Z-Wave coordinator coming
+# back after an outage) fires one state-changed event per entity, spread
+# across a short window rather than all in the same tick. Coalescing them
+# into a single batched drain caps recorder load at a handful of bulk
+# queries instead of one targeted query per entity. Short relative to
+# INCREMENTAL_DEBOUNCE_SECONDS since a lone re-registration (the common
+# case) should still feel close to immediate.
+REREGISTER_DEBOUNCE_SECONDS = 2
+# Hard upper bound on how long a continuously-arriving burst can push the
+# debounce back before it is drained anyway, for the same reason
+# INCREMENTAL_MAX_WAIT_SECONDS exists: a coordinator that keeps registering
+# new entities for a while must not starve the drain of all of them
+# indefinitely.
+REREGISTER_MAX_WAIT_SECONDS = 10
+
+# Debounce for the boot-pending recovery burst drain (see
+# _on_pending_entity_recovered / _drain_pending_recovery_burst): a mass
+# unavailable-to-real transition early in boot (a Zigbee/Z-Wave mesh
+# finishing formation and announcing many devices within the same few
+# seconds) fires one state-changed event per entity, and reacting to each
+# with its own recorder query is the same thundering-herd risk
+# REREGISTER_DEBOUNCE_SECONDS guards against, just at boot instead of
+# during normal runtime. Kept as its own constant (same value) rather than
+# reusing REREGISTER_DEBOUNCE_SECONDS so the two can be tuned independently
+# if one ever needs to change without affecting the other.
+PENDING_RECOVERY_DEBOUNCE_SECONDS = 2
+# Hard upper bound on how long a continuously-arriving boot recovery burst
+# can push the debounce back before it is drained anyway, for the same
+# reason REREGISTER_MAX_WAIT_SECONDS exists.
+PENDING_RECOVERY_MAX_WAIT_SECONDS = 10
+
 EVENT_RESTORED = f"{DOMAIN}_restored"
 
 # Snapshot store (fallback when the recorder no longer has the entity).
