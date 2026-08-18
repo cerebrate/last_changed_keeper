@@ -21,9 +21,19 @@ from custom_components.last_changed_keeper.const import (
     CONF_DOMAINS,
     CONF_ENTITIES,
     DOMAIN,
+    REREGISTER_DEBOUNCE_SECONDS,
     RETRY_DELAYS,
     STORAGE_KEY,
 )
+
+
+async def _flush_reregister_burst(hass: HomeAssistant) -> None:
+    """Advance past the re-registration debounce so the batched drain (see
+    _drain_reregister_burst) runs, then let its recorder query settle."""
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=REREGISTER_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
 
 
 async def _add_entry(hass: HomeAssistant) -> MockConfigEntry:
@@ -61,6 +71,7 @@ async def test_reregistration_patches_from_snapshot(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
 
     live = hass.states.get("light.kitchen")
     assert live.last_changed == stale
@@ -108,6 +119,7 @@ async def test_reregistration_retries_when_not_immediately_resolvable(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
 
     # Nothing resolvable yet (no recorder history, no snapshot) -> retry
     # timers scheduled for this entity instead of giving up immediately.
@@ -156,8 +168,10 @@ async def test_reregistration_retry_ladder_does_not_grow_on_repeated_failure(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
 
-    # Nothing resolvable -> the first attempt failed and armed one ladder.
+    # Nothing resolvable -> the first attempt (via the batched drain, not
+    # _attempt_reregister_patch - see below) failed and armed one ladder.
     assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
 
     # Drive every rung while the entity stays unresolvable. The ladder must
@@ -169,8 +183,11 @@ async def test_reregistration_retry_ladder_does_not_grow_on_repeated_failure(
         armed = job._reregister_retry_timers.get("light.kitchen", [])
         assert len(armed) <= len(RETRY_DELAYS)
 
-    # Exactly one initial attempt plus one per retry delay - not a multiple.
-    assert len(attempts) == 1 + len(RETRY_DELAYS)
+    # One attempt per retry delay - not a multiple. The initial attempt goes
+    # through the batched drain (_drain_reregister_burst), which calls
+    # _resolve directly rather than _attempt_reregister_patch, so it isn't
+    # counted here - only the retry ladder is.
+    assert len(attempts) == len(RETRY_DELAYS)
     # Ladder exhausted: the entry is pruned rather than left behind holding
     # already-fired timers (one stale entry per entity, forever, otherwise).
     assert "light.kitchen" not in job._reregister_retry_timers
@@ -220,6 +237,7 @@ async def test_successful_retry_cancels_the_rest_of_the_ladder(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
     assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
 
     stale = dt_util.utcnow() - timedelta(days=1)
@@ -248,6 +266,7 @@ async def test_new_reregistration_replaces_armed_ladder(
         await hass.async_block_till_done()
         hass.states.async_set("light.kitchen", "on")
         await hass.async_block_till_done()
+        await _flush_reregister_burst(hass)
         assert len(job._reregister_retry_timers["light.kitchen"]) == len(RETRY_DELAYS)
 
 
@@ -281,6 +300,7 @@ async def test_unload_cancels_reregister_listener_and_retries(
     await hass.async_block_till_done()
     hass.states.async_set("light.kitchen", "on")
     await hass.async_block_till_done()
+    await _flush_reregister_burst(hass)
     assert "light.kitchen" in job._reregister_retry_timers
 
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -288,6 +308,86 @@ async def test_unload_cancels_reregister_listener_and_retries(
 
     assert job._unsub_reregister_listener is None
     assert job._reregister_retry_timers == {}
+
+
+async def test_unload_cancels_pending_reregister_burst(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """A re-registration still sitting in the debounce window at unload
+    time must not fire its drain afterwards against a torn-down job."""
+    hass.states.async_set("light.kitchen", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    hass.states.async_remove("light.kitchen")
+    await hass.async_block_till_done()
+    hass.states.async_set("light.kitchen", "on")
+    await hass.async_block_till_done()
+    assert "light.kitchen" in job._reregister_burst
+    assert job._reregister_flush_timer is not None
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert job._reregister_burst == set()
+    assert job._reregister_flush_timer is None
+
+    # The timer that would have flushed the burst must be well and truly
+    # cancelled, not just forgotten about - fire time forward past it and
+    # confirm nothing blows up trying to act on a torn-down job.
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=REREGISTER_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
+
+async def test_reregistration_burst_is_coalesced_into_one_batched_drain(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Regression: a burst of re-registrations arriving close together (a
+    hub's config entry reloading with several entities at once) must be
+    coalesced into a single batched drain instead of firing one recorder
+    query per entity - see _drain_reregister_burst.
+    """
+    import custom_components.last_changed_keeper as lck
+
+    entity_ids = [f"light.bulb_{i}" for i in range(5)]
+    for entity_id in entity_ids:
+        hass.states.async_set(entity_id, "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+
+    calls: list[list[str]] = []
+
+    def fake_bulk_query(_hass, _start, chunk):
+        calls.append(list(chunk))
+        return {}
+
+    monkeypatch.setattr(lck, "_bulk_query", fake_bulk_query)
+
+    for entity_id in entity_ids:
+        hass.states.async_remove(entity_id)
+        await hass.async_block_till_done()
+        hass.states.async_set(entity_id, "on")
+        await hass.async_block_till_done()
+
+    # All five re-registered within the debounce window -> queued together,
+    # not yet drained (and no recorder query issued yet).
+    assert job._reregister_burst == set(entity_ids)
+    assert calls == []
+
+    await _flush_reregister_burst(hass)
+
+    # One batched recorder query covering every entity in the burst, not
+    # five separate ones.
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(entity_ids)
+    assert job._reregister_burst == set()
+
+    # None of them were resolvable (fake query returns nothing, no
+    # snapshot) -> each still gets its own retry ladder, same as before.
+    for entity_id in entity_ids:
+        assert entity_id in job._reregister_retry_timers
 
 
 async def test_cleanup_if_done_does_not_tear_down_reregister_listener(
