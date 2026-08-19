@@ -2,6 +2,121 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.6] — 2026-08-18
+### Changed
+- **`_patch_all_pending` (the scheduled/manual retry sweep of `self._pending`)
+  now re-checks each entity's pending membership immediately before
+  querying it, instead of only once when the sweep's snapshot was taken.**
+  A scheduled retry pass and the boot-pending recovery burst's drain (see
+  below) are both coroutines that yield control at their own await points,
+  so they can run concurrently: without the re-check, a retry pass working
+  through its snapshot could still call into an entity the drain had
+  already resolved and discarded moments earlier, issuing a wasted
+  redundant recorder query for it. Existing margin/bounded-run checks in
+  `_resolve()` already prevented this from producing a *wrong* value, but
+  the redundant work was needless recorder load that grows with how often
+  the two paths overlap.
+
+- **The boot-pending recovery listener (entities still unavailable/unknown
+  when the boot pass ran) now coalesces unavailable→real transitions into a
+  single batched drain, the same treatment already given to the
+  re-registration listener above.** Previously, every transition
+  immediately spawned its own task issuing its own targeted, per-entity
+  recorder query (`_patch_pending`, always querying without bulk data). A
+  mass recovery early in boot — a Zigbee/Z-Wave mesh finishing formation and
+  announcing many devices within the same few seconds — fired one recorder
+  query per entity all at once, and each of those queries used the raw,
+  undeduplicated deep query rather than the recorder's genuine-value-change
+  bulk query, the same correctness gap fixed for re-registrations above.
+
+  Transitions are now debounce-coalesced (`PENDING_RECOVERY_DEBOUNCE_SECONDS`,
+  capped by `PENDING_RECOVERY_MAX_WAIT_SECONDS`) into a burst set, then
+  drained together via `_drain_pending_recovery_burst`, which reuses the
+  boot pass's streaming bulk-query machinery (`_iter_bulk_batches`). Unlike
+  the re-registration burst there's no separate per-entity retry ladder
+  here: an entity the drain can't resolve simply stays in `_pending`, same
+  as it always has, for the existing scheduled retry passes
+  (`_schedule_retries` / `_patch_all_pending`) to pick up later.
+
+- **The streamed bulk recorder query (`_iter_bulk_batches`, shared by the
+  boot pass, `verify`, and the re-registration/pending-recovery burst
+  drains) now paces itself with a zero-delay `asyncio.sleep(0)` after each
+  batch.** A large "track all entities" install can mean many batches back
+  to back, each a synchronous query on the recorder's own single-worker
+  executor; without a yield point between them, the pass's own coroutine
+  was immediately ready again the instant one batch resolved, which could
+  crowd out other ready callbacks on the main event loop for the whole
+  pass. `sleep(0)` is a pure yield with no added delay — pacing this way
+  costs nothing in wall-clock time, it only gives other already-ready work
+  a fair turn between batches.
+
+- **Runtime re-registrations (a config entry reload, a Zigbee/Z-Wave device
+  or coordinator rejoining) are now coalesced into a single batched drain
+  instead of firing one recorder query per entity.** Previously, every
+  re-registration event immediately spawned its own task, and each task ran
+  its own targeted, per-entity recorder query
+  (`_attempt_reregister_patch`). A mass re-registration — a hub's config
+  entry reloading with hundreds of entities at once, or a coordinator
+  reconnecting after an outage and re-registering everything it owns —
+  therefore fired hundreds of concurrent tasks, each issuing its own
+  recorder query: a thundering herd on the recorder executor with no
+  batching at all, unlike the boot pass (which has used a streamed bulk
+  query since 0.9.4).
+
+  Re-registrations are now debounce-coalesced (`REREGISTER_DEBOUNCE_SECONDS`,
+  capped by `REREGISTER_MAX_WAIT_SECONDS` for a continuously-arriving burst,
+  the same debounce/max-wait shape already used for the incremental
+  store) into a burst set, then drained together via
+  `_drain_reregister_burst` — which reuses the boot pass's streaming bulk
+  query machinery (`_iter_bulk_batches`) instead of querying one entity at a
+  time. A mass re-registration now costs a handful of batched queries
+  (bounded by `bulk_batch_size`) instead of one query per entity.
+
+  Entities that don't resolve from the batched drain still get the same
+  per-entity retry ladder as before (`retry_delays`) — retries are already
+  spread out in time and aren't the source of the thundering-herd risk, so
+  that path is unchanged. A single, isolated re-registration (the common
+  case) still resolves quickly; it just now waits out the short debounce
+  window first rather than being patched on the very next event loop tick.
+
+### Fixed
+- **An entity recovering from `unavailable`/`unknown` to a real value during
+  normal runtime (not a restart, not a full re-registration) reset
+  `last_changed` the same way a restart does, but nothing ever corrected it
+  back.** HA's own state machine treats `unavailable`/`unknown` as a
+  distinct value, so a brief network blip, Zigbee/Z-Wave mesh hiccup, or
+  coordinator reconnect that took a device briefly offline and back
+  genuinely bumped its `last_changed` to the recovery moment — even though,
+  from this integration's point of view, that's exactly the same kind of
+  artifact a restart produces. Unlike a restart, nothing previously
+  re-examined that entity afterwards: the boot pass only runs once at
+  startup, and the re-registration listener only fired when an entity was
+  fully re-created (`old_state is None`), not when it merely recovered from
+  an invalid state. Left uncorrected, an entity that flaps `unavailable`
+  periodically — common for exactly this class of device — drifted wrong
+  forever, self-healing only at the next full HA restart.
+
+  Field-diagnosed on the same real installation as 0.9.3/0.9.5: a fresh
+  `verify` pass reported 811 mismatches out of 3,450 checked entities.
+  Cross-referencing each mismatch against the recorder database (read-only)
+  showed 734 of the 811 (90.5%, spread across 16 different domains) were
+  immediately preceded by an `unavailable`/`unknown` row — not a boot reset,
+  not a full re-registration.
+
+  The re-registration listener now also fires on recovery from
+  `unavailable`/`unknown` (`old_state.state in INVALID_STATES`), routing it
+  through the same debounced batched drain as re-registrations. The
+  incremental store listener (`_on_target_state_changed`) now excludes this
+  same transition from its debounce merge — it was previously treating a
+  recovery-from-unavailable exactly like a genuine value change, which would
+  have written the raw reset artifact into the snapshot store as if it were
+  real, poisoning it for the next boot even after the live value was
+  corrected. An entity is now marked `_unconfirmed` the moment it's queued
+  for the drain (not just after a failed attempt), closing a narrow race
+  where a snapshot write during the debounce window could persist the reset
+  artifact before the drain had a chance to correct it.
+
+
 ## [0.9.5] — 2026-08-17
 ### Fixed
 - **The snapshot store could get permanently poisoned with a restart
