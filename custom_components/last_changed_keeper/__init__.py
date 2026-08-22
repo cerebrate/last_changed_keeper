@@ -40,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -1390,32 +1390,30 @@ class _RestoreJob:
         burst, self._reregister_burst = self._reregister_burst, set()
         self.hass.async_create_task(self._drain_reregister_burst(burst))
 
-    async def _drain_reregister_burst(self, entity_ids: set[str]) -> None:
-        """Batched replacement for one recorder query per re-registered
-        entity: resolves the whole debounced burst together through the same
-        streaming bulk-query machinery the boot pass uses
-        (_iter_bulk_batches), so a mass re-registration costs a handful of
-        batched queries instead of one targeted query per entity.
+    async def _resolve_candidates(
+        self,
+        candidates: list[str],
+        candidate_last_changed: dict[str, datetime],
+        *,
+        on_unresolved: Callable[[str], None] | None = None,
+    ) -> None:
+        """Shared streaming resolve/apply loop for a pre-filtered candidate
+        list: resolves the whole list together through the same streaming
+        bulk-query machinery the boot pass uses (_iter_bulk_batches), so a
+        batch of entities costs a handful of queries instead of one targeted
+        query per entity.
 
-        Mirrors _async_run_impl's candidate/re-validate loop rather than
-        reusing _attempt_reregister_patch, since that helper always queries
-        one entity at a time (it also serves the retry ladder below, where
-        that is the right shape — retries are already spread across
-        RETRY_DELAYS, not bursty). Entities that don't resolve here still get
-        the same retry ladder as before.
+        Used by both _drain_reregister_burst (candidates grace-filtered: a
+        just-registered/discovered entity's artifact is always fresh) and
+        _drain_unconfirmed_burst (candidates NOT grace-filtered: membership
+        in self._unconfirmed is itself the trust signal that an entity's
+        live last_changed is still fake, regardless of how old that artifact
+        now looks by wall-clock time). on_unresolved, when given, lets the
+        caller arm its own retry mechanism for anything still unresolved
+        (e.g. the reregistration retry ladder) — the unconfirmed sweep has
+        no equivalent, since an unresolved entity simply stays in
+        self._unconfirmed for the next periodic sweep to retry.
         """
-        _, _, _, grace, _, _ = self._config
-        candidates: list[str] = []
-        candidate_last_changed: dict[str, datetime] = {}
-        for entity_id in entity_ids:
-            live = self.hass.states.get(entity_id)
-            if live is None or live.state in INVALID_STATES:
-                continue
-            if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
-                continue
-            candidates.append(entity_id)
-            candidate_last_changed[entity_id] = live.last_changed
-
         async for chunk, bulk in self._iter_bulk_batches(candidates):
             for entity_id in chunk:
                 # Re-validate against the snapshot taken above: the bulk
@@ -1432,15 +1430,67 @@ class _RestoreJob:
                 ts = await self._resolve(entity_id, live, bulk.get(entity_id))
                 if ts is not None:
                     self._apply(live, ts, entity_id)
-                    _LOGGER.debug(
-                        "%s: re-patched after runtime re-registration", entity_id
-                    )
+                    _LOGGER.debug("%s: re-patched by batched drain", entity_id)
                 else:
-                    # Unresolved: live.last_changed is still this
-                    # re-registration's raw reset value — see _unconfirmed.
+                    # Unresolved: live.last_changed is still a raw reset
+                    # artifact — see _unconfirmed.
                     self._unconfirmed.add(entity_id)
-                    self._schedule_reregister_retries(entity_id, grace)
+                    if on_unresolved is not None:
+                        on_unresolved(entity_id)
             del bulk  # released before the next batch is fetched
+
+    async def _drain_reregister_burst(self, entity_ids: set[str]) -> None:
+        """Batched replacement for one recorder query per re-registered
+        entity — see _resolve_candidates for the shared streaming loop.
+
+        Candidates are grace-filtered here (unlike _drain_unconfirmed_burst)
+        because a re-registration or freshly-discovered entity's artifact
+        genuinely is recent; entities that don't resolve get the same retry
+        ladder as before (_schedule_reregister_retries).
+        """
+        _, _, _, grace, _, _ = self._config
+        candidates: list[str] = []
+        candidate_last_changed: dict[str, datetime] = {}
+        for entity_id in entity_ids:
+            live = self.hass.states.get(entity_id)
+            if live is None or live.state in INVALID_STATES:
+                continue
+            if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
+                continue
+            candidates.append(entity_id)
+            candidate_last_changed[entity_id] = live.last_changed
+
+        await self._resolve_candidates(
+            candidates,
+            candidate_last_changed,
+            on_unresolved=lambda eid: self._schedule_reregister_retries(eid, grace),
+        )
+
+    async def _drain_unconfirmed_burst(self, entity_ids: set[str]) -> None:
+        """Batched re-resolve attempt for entities already known to hold a
+        fake last_changed (self._unconfirmed) — see
+        _async_scan_for_new_targets. Deliberately not grace-filtered: an
+        entity's resolve attempt can fail on a fresh boot (e.g. a recorder
+        cold-start race on a large install) even though the true answer
+        becomes available minutes later, and without this sweep nothing
+        would ever retry it again — its live last_changed stops looking
+        "fresh" the moment wall-clock time drifts past grace, even though
+        it's still exactly as fake as it was at boot.
+
+        No fast retry ladder is armed for anything still unresolved here:
+        the next periodic sweep will simply pick it up again, since it
+        stays in self._unconfirmed until it's genuinely fixed.
+        """
+        candidates: list[str] = []
+        candidate_last_changed: dict[str, datetime] = {}
+        for entity_id in entity_ids:
+            live = self.hass.states.get(entity_id)
+            if live is None or live.state in INVALID_STATES:
+                continue
+            candidates.append(entity_id)
+            candidate_last_changed[entity_id] = live.last_changed
+
+        await self._resolve_candidates(candidates, candidate_last_changed)
 
     async def _attempt_reregister_patch(
         self, entity_id: str, grace: float
@@ -1530,43 +1580,69 @@ class _RestoreJob:
     # ----- Periodic target-discovery sweep ----------------------------------
 
     async def _async_scan_for_new_targets(self, _now: datetime | None = None) -> None:
-        """Periodic timer callback (see NEW_TARGET_SCAN_INTERVAL_SECONDS).
+        """Periodic timer callback (see NEW_TARGET_SCAN_INTERVAL_SECONDS)
+        that sweeps two distinct populations sharing one timer.
 
-        _async_run_impl resolves targets exactly once, at boot, from
-        whatever entities already have a live state at that instant. An
-        entity whose owning integration is still mid-setup at that moment
-        (a coordinator doing its first data fetch before creating entities —
-        common for cloud/hub/mesh integrations enumerating many child
-        devices) is invisible to that one-time snapshot, and therefore
-        invisible to every patch mechanism this integration has — the boot
-        pass, the re-registration listener, and the incremental listener all
-        only know about entity_ids that existed at that instant. Without
-        this sweep such an entity stays wrong for the rest of the session,
-        only getting a chance again at the next full restart, where the
-        same race can recur. async_verify doesn't have this gap since it
-        re-resolves targets fresh on every call — this sweep gives the live
-        listeners the same freshness, just on a timer instead of on demand.
+        1. Newly-existing targets. _async_run_impl resolves targets exactly
+        once, at boot, from whatever entities already have a live state at
+        that instant. An entity whose owning integration is still mid-setup
+        at that moment (a coordinator doing its first data fetch before
+        creating entities — common for cloud/hub/mesh integrations
+        enumerating many child devices) is invisible to that one-time
+        snapshot, and therefore invisible to every patch mechanism this
+        integration has — the boot pass, the re-registration listener, and
+        the incremental listener all only know about entity_ids that
+        existed at that instant. Without this sweep such an entity stays
+        wrong for the rest of the session, only getting a chance again at
+        the next full restart, where the same race can recur. Newly found
+        entities are folded into self._known_targets and driven through
+        _drain_reregister_burst — the exact same batched resolve/patch path
+        a burst of runtime re-registrations already uses, since "just
+        discovered" and "just re-registered" need identical handling (both
+        start from a live last_changed that is a raw reset/creation
+        artifact, not a real value).
 
-        Newly found entities are folded into self._known_targets and driven
-        through _drain_reregister_burst — the exact same batched
-        resolve/patch path a burst of runtime re-registrations already
-        uses, since "just discovered" and "just re-registered" need
-        identical handling (both start from a live last_changed that is a
-        raw reset/creation artifact, not a real value).
+        2. Still-unconfirmed existing targets. A candidate that already
+        existed at boot (or was already swept in) but whose resolve attempt
+        simply failed — e.g. a recorder cold-start race on a large install,
+        where the true answer only becomes queryable a few minutes after
+        boot — is otherwise abandoned forever: unlike a boot-pending entity
+        (self._pending, unavailable/unknown at boot) it never got a retry
+        ladder in the first place, and nothing else ever revisits it unless
+        its value genuinely changes or it's fully re-registered, neither of
+        which happens for the largely-static diagnostic/config entities
+        this hits hardest. self._unconfirmed is the durable, always-correct
+        signal for exactly this: set on every resolve failure, reliably
+        cleared the moment an entity is genuinely patched or genuinely
+        changes value (_apply, the incremental listener). This half of the
+        sweep re-attempts everything still in self._unconfirmed via
+        _drain_unconfirmed_burst, excluding anything currently in
+        self._pending (already being actively chased by the boot-pending
+        listener/retry ladder, so sweeping it here too would just be a
+        redundant, concurrent resolve attempt for the same entity).
+
+        async_verify doesn't have either gap since it re-resolves every
+        current target fresh, with no grace/pending gating, on every call —
+        this sweep gives the live listeners that same freshness, just on a
+        timer instead of on demand.
         """
         domains, entities, exclude, _, labels, areas = self._config
         current = self._targets(domains, entities, exclude, labels, areas)
         new_targets = current - self._known_targets
-        if not new_targets:
-            return
-        self._known_targets |= new_targets
-        self._resubscribe_persistent_listeners()
-        # Mark unconfirmed immediately, same reasoning as
-        # _on_entity_reregistered: a snapshot write racing in before the
-        # drain below completes must not persist these entities' current
-        # (first-creation-time) last_changed as if it were real.
-        self._unconfirmed |= new_targets
-        self.hass.async_create_task(self._drain_reregister_burst(new_targets))
+        if new_targets:
+            self._known_targets |= new_targets
+            self._resubscribe_persistent_listeners()
+            # Mark unconfirmed immediately, same reasoning as
+            # _on_entity_reregistered: a snapshot write racing in before the
+            # drain below completes must not persist these entities'
+            # current (first-creation-time) last_changed as if it were
+            # real.
+            self._unconfirmed |= new_targets
+            self.hass.async_create_task(self._drain_reregister_burst(new_targets))
+
+        stale = self._unconfirmed - new_targets - self._pending
+        if stale:
+            self.hass.async_create_task(self._drain_unconfirmed_burst(stale))
 
     @callback
     def _resubscribe_persistent_listeners(self) -> None:
