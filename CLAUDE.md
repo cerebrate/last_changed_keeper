@@ -205,6 +205,46 @@ boot is precisely the case the sweep exists to cover — the `if not targets:
 return 0` short-circuit only skips the boot candidate-patching loop below
 it, not this setup.
 
+The same timer also drives a second, independent sweep over entities that
+already existed (or were already discovered) but whose resolve attempt
+simply *failed* — an equally permanent dead end that predates the
+discovery sweep. Inside the boot pass, a candidate with no live state at
+all becomes a boot-pending entity (`self._pending`) and gets both a
+listener and the `RETRY_DELAYS` retry ladder; but a candidate that *does*
+have a live value and simply fails `_resolve()` (e.g. a recorder
+cold-start race on a large install, where the true answer only becomes
+queryable a few minutes after boot — the same race the discovery sweep
+covers for missing entities, just for a value the recorder hasn't caught
+up on yet rather than an entity that doesn't exist yet) is marked
+`self._unconfirmed` and then abandoned: no retry ladder, no listener,
+nothing revisits it again unless its value genuinely changes or it's fully
+re-registered — neither of which happens for the largely-static
+diagnostic/config entities this hits hardest. The exact same gap exists in
+`_drain_reregister_burst` for a re-registration/discovery-sweep candidate
+that fails to resolve on its first attempt (that path at least arms
+`_schedule_reregister_retries`, but once that ladder also exhausts, the
+entity is abandoned the same way). `self._unconfirmed` is already the
+durable, always-correct signal for "this entity's live `last_changed` is
+still a fake artifact" — set on every resolve failure, reliably cleared the
+moment an entity is genuinely patched (`_apply`) or genuinely changes value
+(the incremental listener) — so `_async_scan_for_new_targets` also
+re-attempts everything still in `self._unconfirmed` (minus anything
+currently in `self._pending`, which is already being actively chased by
+the boot-pending listener/retry ladder) via `_drain_unconfirmed_burst`.
+
+Critically, `_drain_unconfirmed_burst` does **not** grace-filter its
+candidates the way `_drain_reregister_burst` does: that filter asks "does
+this look like a fresh restart artifact right now?", which is exactly
+wrong for an entity whose artifact is now hours or days stale by
+wall-clock time — that staleness is the bug, not a reason to skip it.
+Membership in `self._unconfirmed` is already the trust signal regardless
+of age. The two drains otherwise share their streaming resolve/apply loop
+via `_resolve_candidates`, parameterized by an optional `on_unresolved`
+callback — `_drain_reregister_burst` uses it to arm the reregistration
+retry ladder, `_drain_unconfirmed_burst` passes none, since anything still
+unresolved simply stays in `self._unconfirmed` for the next periodic sweep
+tick to retry.
+
 **`last_triggered`** (for `automation.*`/`script.*`) is a *separate* patch
 path (`_maybe_restore_last_triggered` / `_resolve_last_triggered` /
 `_apply_last_triggered`) — it's an attribute, not the state value, so it needs

@@ -2,6 +2,52 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.8] — 2026-08-22
+### Fixed
+- **An entity that had a live value at boot but simply failed to resolve
+  was abandoned forever — no retry ladder, no listener, nothing ever
+  revisited it again.** Unlike a boot-pending entity (no live state at all,
+  which gets a listener plus the `RETRY_DELAYS` retry ladder), a candidate
+  that resolves during the boot pass and comes back `None` was only ever
+  marked `self._unconfirmed`; nothing scheduled a further attempt. The same
+  gap existed for `_drain_reregister_burst` candidates (re-registrations
+  and 0.9.7's newly-discovered entities) once their own retry ladder
+  exhausted. For the largely-static diagnostic/config entities this hits
+  hardest — battery/info sensors, aggregate/health sensors, alarm-panel
+  zones, and similar entities that rarely if ever change value again —
+  nothing was ever going to trigger a retry, so a single failed resolve
+  attempt meant the entity stayed wrong for the rest of the session.
+
+  Field-diagnosed on the same ~3,600-entity installation via a `verify` run
+  taken after 0.9.7 was already deployed: 675 mismatches spanning nearly
+  every domain and integration in the install (Magic Areas aggregates, a
+  k8s cluster monitor, an alarm panel, Z-Wave diagnostics, `alert2`,
+  automations, and more) — too broad to be integration-specific. The
+  tell was in the timestamps: `verify`'s freshly-computed expected values
+  were themselves often just *older* restart artifacts shared by dozens of
+  unrelated entities, and `verify` — called well after boot, with the
+  recorder fully warmed up — resolved these entities correctly using the
+  exact same `_resolve()` chain that had failed for them at boot time.
+  Most likely a recorder cold-start race on a large install (bulk/deep
+  queries outrunning the recorder's own startup work), though the specific
+  cause doesn't change the fix: a candidate whose resolve attempt failed is
+  a dead end architecturally identical to the "entity didn't exist yet at
+  boot" gap 0.9.7 fixed for a different population.
+
+  Extends the periodic sweep already added in 0.9.7
+  (`_async_scan_for_new_targets`, same `NEW_TARGET_SCAN_INTERVAL_SECONDS`
+  timer) with a second pass: re-attempt resolution for everything still in
+  `self._unconfirmed` — the set that already reliably tracks "this
+  entity's live `last_changed` is still a fake artifact" — excluding
+  anything currently in `self._pending` (already being actively chased by
+  the boot-pending listener/retry ladder). Unlike the discovery half of the
+  sweep, this new `_drain_unconfirmed_burst` deliberately does not
+  grace-filter its candidates: an artifact that's now hours or days stale
+  by wall-clock time is exactly the entity this fix needs to catch, not one
+  to skip. The streaming resolve/apply loop shared by both drains was
+  factored out into `_resolve_candidates` to avoid duplicating it a third
+  time.
+
 ## [0.9.7] — 2026-08-18
 ### Fixed
 - **Entities whose owning integration is still mid-setup when HA "started"

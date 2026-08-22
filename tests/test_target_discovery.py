@@ -211,3 +211,89 @@ async def test_unload_cancels_target_discovery_timer(
     await hass.async_block_till_done()
 
     assert job._unsub_target_discovery_timer is None
+
+
+async def test_stale_unconfirmed_entity_retried_and_patched_on_later_sweep(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, hass_storage
+) -> None:
+    """A candidate that exists at boot but whose resolve attempt fails (no
+    usable snapshot entry, no recorder history yet) must not be abandoned
+    forever - the periodic sweep keeps retrying it, and picks it up the
+    moment a real answer becomes available, e.g. once the incremental/
+    periodic snapshot store gains an entry for it. This also proves the
+    retry is not grace-gated: several sweep ticks push the entity's live
+    last_changed well past the default grace window before it resolves."""
+    hass.states.async_set("light.stuck_bulb", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+    await hass.async_block_till_done()
+
+    boot_last_changed = hass.states.get("light.stuck_bulb").last_changed
+    assert "light.stuck_bulb" in job._unconfirmed
+
+    # Several sweep ticks with nothing new to resolve it from - still
+    # stuck, and by now well past the default grace window (1800s).
+    for _ in range(7):
+        await _flush_discovery_sweep(hass)
+    assert hass.states.get("light.stuck_bulb").last_changed == boot_last_changed
+    assert "light.stuck_bulb" in job._unconfirmed
+
+    real = boot_last_changed - timedelta(days=2)
+    job._snapshot["light.stuck_bulb"] = {"s": "on", "t": real.isoformat()}
+
+    await _flush_discovery_sweep(hass)
+
+    live = hass.states.get("light.stuck_bulb")
+    assert live.last_changed == real
+    assert "light.stuck_bulb" not in job._unconfirmed
+
+
+async def test_pending_entity_not_double_drained_by_unconfirmed_sweep(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant, monkeypatch
+) -> None:
+    """An entity unavailable at boot goes into self._pending (with its own
+    listener and RETRY_DELAYS ladder) and is also marked self._unconfirmed
+    - the unconfirmed half of the periodic sweep must not also drain it
+    concurrently, since that would just be a redundant resolve attempt
+    racing the boot-pending machinery."""
+    hass.states.async_set("light.slow_join", "unavailable")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+    await hass.async_block_till_done()
+
+    assert "light.slow_join" in job._pending
+    assert "light.slow_join" in job._unconfirmed
+
+    drain_calls: list[set[str]] = []
+    orig_drain = job._drain_unconfirmed_burst
+
+    async def fake_drain(entity_ids: set[str]) -> None:
+        drain_calls.append(set(entity_ids))
+        await orig_drain(entity_ids)
+
+    monkeypatch.setattr(job, "_drain_unconfirmed_burst", fake_drain)
+
+    await _flush_discovery_sweep(hass)
+
+    assert drain_calls == []
+
+
+async def test_unconfirmed_entity_gone_unavailable_is_skipped_not_crashed(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """An entity that was unconfirmed but has since gone unavailable must
+    be skipped by the unconfirmed sweep (not force-patched, not crashed)
+    and left in self._unconfirmed - its eventual recovery is the existing
+    re-registration listener's job, not this sweep's."""
+    hass.states.async_set("light.flaky_bulb", "on")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+    await hass.async_block_till_done()
+    assert "light.flaky_bulb" in job._unconfirmed
+
+    hass.states.async_set("light.flaky_bulb", "unavailable")
+    await hass.async_block_till_done()
+
+    await _flush_discovery_sweep(hass)  # must not raise
+
+    assert "light.flaky_bulb" in job._unconfirmed

@@ -77,14 +77,17 @@ PENDING_RECOVERY_DEBOUNCE_SECONDS = 2
 # reason REREGISTER_MAX_WAIT_SECONDS exists.
 PENDING_RECOVERY_MAX_WAIT_SECONDS = 10
 
-# How often (seconds) to re-check for entities matching the configured
-# target criteria that didn't exist yet when the boot pass took its
-# one-time targets snapshot (see resolve_targets/_async_run_impl) - a
-# coordinator-based integration (hub/mesh, cloud-polling) can take anywhere
-# from seconds to tens of minutes after HA "started" to finish creating its
-# entities, and until this sweep finds them they're invisible to every
-# patch mechanism this integration has (boot pass, re-registration
-# listener, incremental listener) for the rest of the session.
+# How often (seconds) _async_scan_for_new_targets ticks. That one timer
+# drives two sweeps: (1) entities matching the configured target criteria
+# that didn't exist yet when the boot pass took its one-time targets
+# snapshot (see resolve_targets/_async_run_impl) - a coordinator-based
+# integration (hub/mesh, cloud-polling) can take anywhere from seconds to
+# tens of minutes after HA "started" to finish creating its entities, and
+# until this sweep finds them they're invisible to every patch mechanism
+# this integration has; and (2) entities that already existed but whose
+# resolve attempt simply failed (self._unconfirmed) and would otherwise be
+# abandoned forever, since nothing else ever revisits an already-known
+# entity once its one resolve attempt has failed.
 NEW_TARGET_SCAN_INTERVAL_SECONDS = 300
 
 EVENT_RESTORED = f"{DOMAIN}_restored"
