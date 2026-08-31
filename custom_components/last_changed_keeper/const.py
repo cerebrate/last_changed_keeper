@@ -25,6 +25,21 @@ VERIFY_AFTER_BOOT_DELAY = 300
 # Default on: most users want everything covered, not a curated domain list.
 DEFAULT_ALL_ENTITIES = True
 
+# Generous bound on how long the boot pass will wait for the recorder to
+# fully finish starting (see Recorder.async_recorder_ready) before running
+# its own recorder-heavy queries anyway. A live schema migration - needed
+# after most HA core upgrades - is deliberately deferred by the recorder
+# itself until after HA reports "started", i.e. the same moment this
+# integration's own boot trigger fires; without this wait the boot pass
+# would run directly against a mid-migration recorder, competing for the
+# same executor/DB the migration was specifically deferred to avoid
+# competing with. Large/low-power installs (SD-card storage, huge
+# databases) have been reported taking up to an hour for such a
+# migration, hence the generous default - a failed migration never
+# resolves the readiness signal at all, so an unconditional (unbounded)
+# wait would hang the boot pass forever instead.
+RECORDER_READY_TIMEOUT_SECONDS = 3600
+
 SERVICE_RESTORE_NOW = "restore_now"
 SERVICE_VERIFY = "verify"
 

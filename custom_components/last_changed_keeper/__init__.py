@@ -128,6 +128,7 @@ from .const import (
     PENDING_RECOVERY_DEBOUNCE_SECONDS,
     PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
+    RECORDER_READY_TIMEOUT_SECONDS,
     REREGISTER_DEBOUNCE_SECONDS,
     REREGISTER_MAX_WAIT_SECONDS,
     RETRY_DELAYS,
@@ -618,10 +619,55 @@ class _RestoreJob:
     async def async_run(self, *, single_pass: bool = False) -> int:
         """Guarded run: an exception must not kill the HA start."""
         try:
+            await self._wait_for_recorder_ready()
             return await self._async_run_impl(single_pass=single_pass)
         except Exception:
             _LOGGER.exception("Last Changed Keeper: async_run failed")
             return 0
+
+    async def _wait_for_recorder_ready(self) -> None:
+        """Wait for the recorder to be genuinely ready before the boot pass
+        runs its own recorder-heavy bulk/deep queries against it.
+
+        manifest.json's "recorder" dependency only guarantees recorder's
+        own async_setup() has returned, which is gated on
+        Recorder.async_db_ready — resolved once the DB is connected and
+        any NON-live migration is done. A *live* migration (the kind
+        needed after most HA core upgrades) is deliberately deferred by
+        the recorder itself until AFTER HA reports "started" ("we do not
+        want it to compete with startup which is also cpu intensive") —
+        i.e. exactly the same moment this integration's own boot trigger,
+        async_at_started, fires. Without this wait, a live migration in
+        progress means our bulk/deep queries compete with it for the same
+        executor/DB, both slowing the boot pass down dramatically and
+        making a late (>grace) _async_run_impl invocation — and the
+        snapshot poisoning that can follow from it (see self._confirmed) —
+        a real, common scenario rather than a hypothetical one.
+
+        Recorder.async_recorder_ready (an asyncio.Event, distinct from
+        async_db_ready) is only set once migration is genuinely finished.
+        It's bounded with a generous timeout rather than awaited
+        unconditionally because a failed live migration never sets it at
+        all — unconditionally awaiting it would then hang this
+        integration's boot pass forever over an unrelated recorder
+        failure. On timeout, proceed anyway: querying a possibly-busy
+        recorder is still better than never running at all.
+        """
+        try:
+            instance = get_instance(self.hass)
+        except Exception:  # noqa: BLE001 - recorder must not kill anything
+            return
+        try:
+            await asyncio.wait_for(
+                instance.async_recorder_ready.wait(),
+                timeout=RECORDER_READY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            _LOGGER.warning(
+                "Last Changed Keeper: recorder still not ready after %ds "
+                "(migration or startup congestion?) - proceeding anyway",
+                RECORDER_READY_TIMEOUT_SECONDS,
+            )
 
     async def _async_run_impl(self, *, single_pass: bool = False) -> int:
         """Initial pass (with bulk query). Sets up listener + re-runs."""

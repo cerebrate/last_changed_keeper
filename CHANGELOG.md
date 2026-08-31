@@ -71,6 +71,34 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   `.storage/last_changed_keeper.snapshot` once after upgrading to let it
   rebuild through the now-safe resolve chain.
 
+- **The boot pass could start querying the recorder before the recorder
+  was genuinely ready, not just "set up."** `manifest.json`'s `recorder`
+  dependency only guarantees `Recorder.async_db_ready` has resolved (DB
+  connected, non-live migration done) before this integration's own setup
+  runs. A *live* schema migration — needed after most HA core upgrades —
+  is deliberately deferred by the recorder itself until *after* HA reports
+  "started," specifically so it doesn't compete with startup CPU load —
+  which is exactly the same moment this integration's own boot trigger
+  (`async_at_started`) fires. Without a wait, the boot pass's recorder-heavy
+  bulk/deep queries would run directly against a mid-migration recorder,
+  competing for the same executor/DB the migration was deferred to avoid
+  competing with — plausibly explaining the field install's abnormally
+  long (~30 minute) boot pass, and giving the "why would `_async_run_impl`
+  run late relative to the true restart" scenario behind the
+  snapshot-poisoning fix above a concrete, recurring mechanism rather than
+  a hand-waved one.
+
+  Adds a bounded wait for `Recorder.async_recorder_ready` (an
+  `asyncio.Event`, distinct from `async_db_ready`, only set once all
+  migration steps genuinely finish) at the start of `async_run()` — the
+  boot-only wrapper; `restore_now`'s service handler calls
+  `_async_run_impl` directly and is unaffected. Bounded rather than
+  unconditional because a *failed* live migration never sets the
+  readiness signal at all; on timeout (`RECORDER_READY_TIMEOUT_SECONDS`,
+  a generous default given large/low-power installs have been reported
+  taking up to an hour for such a migration) the boot pass proceeds
+  anyway rather than hanging forever.
+
 ## [0.9.8] — 2026-08-22
 ### Fixed
 - **An entity that had a live value at boot but simply failed to resolve

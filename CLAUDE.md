@@ -38,6 +38,33 @@ files are thin: `config_flow.py` (GUI schema, shared target-count preview via
 `resolve_targets`), `sensor.py` (one diagnostic status sensor), `diagnostics.py`,
 `const.py` (all tunables/keys/defaults).
 
+**Before the boot pass runs at all**, `async_run()` (the wrapper the
+`async_at_started` boot trigger calls — not `_async_run_impl` directly,
+which `restore_now`'s service handler calls unwrapped) awaits
+`_wait_for_recorder_ready()`. `manifest.json`'s `"recorder"` dependency
+only guarantees recorder's own `async_setup()` has returned, which is
+gated on `Recorder.async_db_ready` — resolved once the DB is connected and
+any *non-live* migration is done. A genuinely *live* migration (needed
+after most HA core upgrades) is deliberately deferred by the recorder
+itself until *after* HA reports "started", specifically so it doesn't
+compete with startup CPU load — which is exactly the same moment
+`async_at_started` fires. Without this wait, the boot pass's own
+recorder-heavy bulk/deep queries would run directly against a
+mid-migration recorder, competing for the same executor/DB the migration
+was deferred to avoid competing with — both slowing the boot pass down
+dramatically (observed: an 11-batch/~150K-row bulk pass taking ~30 minutes
+on the field install) and making a late (`>grace`) `_async_run_impl`
+invocation, and the snapshot poisoning that follows from it (see
+`self._confirmed` below), a real, recurring condition rather than a rare
+edge case. `Recorder.async_recorder_ready` (an `asyncio.Event`, distinct
+from `async_db_ready`) is only set once all migration steps genuinely
+finish; it's awaited with a generous but bounded timeout
+(`RECORDER_READY_TIMEOUT_SECONDS`) rather than unconditionally, since a
+*failed* live migration never sets it at all — an unbounded wait would
+then hang the boot pass forever over an unrelated recorder failure. On
+timeout, the boot pass proceeds anyway (logged as a warning): querying a
+possibly-busy recorder is still better than never running at all.
+
 **Core flow (`_RestoreJob._async_run_impl`, boot pass):**
 1. Resolve targets via `resolve_targets()` (domains/entities/labels/areas minus
    exclude, or literally every entity if "all_entities" is on) — this function is
