@@ -223,14 +223,28 @@ diagnostic/config entities this hits hardest. The exact same gap exists in
 `_drain_reregister_burst` for a re-registration/discovery-sweep candidate
 that fails to resolve on its first attempt (that path at least arms
 `_schedule_reregister_retries`, but once that ladder also exhausts, the
-entity is abandoned the same way). `self._unconfirmed` is already the
-durable, always-correct signal for "this entity's live `last_changed` is
-still a fake artifact" — set on every resolve failure, reliably cleared the
-moment an entity is genuinely patched (`_apply`) or genuinely changes value
-(the incremental listener) — so `_async_scan_for_new_targets` also
-re-attempts everything still in `self._unconfirmed` (minus anything
-currently in `self._pending`, which is already being actively chased by
-the boot-pending listener/retry ladder) via `_drain_unconfirmed_burst`.
+entity is abandoned the same way) — and, until P7, for a boot-pending
+entity too: once its one recovery-triggered resolve attempt (or the
+`RETRY_DELAYS` ladder) exhausted without success, `self._pending` had no
+further retry mechanism of its own, and the periodic sweep explicitly
+excluded anything still in `self._pending` from its own retry set,
+recreating the identical dead end for a different population.
+`self._unconfirmed` is already the durable, always-correct signal for
+"this entity's live `last_changed` is still a fake artifact" — set on
+every resolve failure, reliably cleared the moment an entity is genuinely
+patched (`_apply`) or genuinely changes value (the incremental listener) —
+so `_async_scan_for_new_targets` also re-attempts everything still in
+`self._unconfirmed` via `_drain_unconfirmed_burst`, **including** entities
+still in `self._pending`: `NEW_TARGET_SCAN_INTERVAL_SECONDS` (300s) is
+longer than the boot-time retry ladder's maximum delay (`RETRY_DELAYS`
+tops out at 180s), so this sweep's first tick can never fire while that
+ladder is still active, and `_drain_unconfirmed_burst`'s own per-entity
+live-state check already skips anything genuinely still unavailable at
+zero recorder cost. A resolve that succeeds here for a still-`_pending`
+entity also clears its `_pending` bookkeeping (see `_resolve_candidates`)
+— otherwise that entity's boot-pending job could never reach the "final"
+finalization that only fires once `_pending` is fully empty
+(`_cleanup_if_done`).
 
 Critically, `_drain_unconfirmed_burst` does **not** grace-filter its
 candidates the way `_drain_reregister_burst` does: that filter asks "does
@@ -257,25 +271,39 @@ Only usable as a resolve source if the entity still holds the *same* value
 recorded in the snapshot, otherwise the timestamp belongs to a different
 value. A separate small store (`STORAGE_KEY_RUNS`) keeps a rolling history
 (`MAX_RUN_HISTORY`) of boot-pass stats, feeding the status sensor/diagnostics.
-Both `async_write_snapshot` (periodic timer and clean-shutdown write) read
-`live.last_changed` straight off the state machine — but for a boot
-candidate that `_resolve()` never manages to patch (any reason: still
-racing the recorder, a legitimate too-recent decline, whatever), that value
-*is* just this restart's raw reset artifact, not a real timestamp. Writing
-it into the snapshot store anyway would poison it: on every future boot,
-`_resolve()`'s snapshot step sees the same still-unchanged value and a
-stored timestamp that's comfortably older than the *new* restart's cutoff,
-clears the margin check, and confidently reapplies that wrong value —
-permanently, since nothing before this ever invalidated a stale entry.
-`self._unconfirmed` tracks exactly this set of not-yet-proven-real entities
-(added when a candidate's `_resolve()` returns nothing or it never
-resolves out of `_pending`/a re-registration retry ladder; discarded by
-`_apply()` on any successful patch and by the incremental listener on any
-genuine value change) so the snapshot writer can leave a poisoned or
-unwritten entry alone instead of overwriting it with the artifact.
-Upgrading past the fix does not retroactively clean an *already*-poisoned
-on-disk snapshot — clear `.storage/last_changed_keeper.snapshot` once after
-upgrading to let it rebuild through the now-safe resolve chain.
+`async_write_snapshot` (periodic timer and clean-shutdown write) trusts an
+entity's *current* `live.state`/`live.last_changed` as ground truth only if
+it's in `self._confirmed` — an **allowlist**, not a blocklist. Being merely
+absent from `self._unconfirmed` is not enough: a boot candidate the
+candidate-building loop classified as "skip" (elapsed since
+`live.last_changed` > `grace`, assumed already genuinely used since boot)
+is never added to `self._unconfirmed` at all — it gets no tracking,
+positive or negative. That classification only holds if `_async_run_impl`
+itself runs shortly after the true HA restart; if it runs late (a slow
+recorder migration, general startup congestion — plausible right after an
+HA/integration upgrade), a still-pristine restart-artifact entity slips
+through untracked. Trusting `live.last_changed` for such an entity would
+poison the snapshot with that artifact: on every future boot, `_resolve()`'s
+snapshot step sees the same still-unchanged value and a stored timestamp
+that's comfortably older than the *new* restart's cutoff, clears the margin
+check, and confidently reapplies that wrong value — permanently, since
+nothing before this ever re-checks an already-"confirmed" entity.
+`self._confirmed` tracks exactly the opposite, narrower set: entities
+positively verified this session, either via a successful `_resolve()`+
+`_apply()` or a genuine value transition observed by the incremental
+listener. It's populated/revoked only through two small helpers,
+`_mark_confirmed`/`_mark_unconfirmed`, which keep it and `self._unconfirmed`
+from drifting out of sync (every place that used to touch one now touches
+both) — an entity that re-registers or otherwise becomes suspect again
+after having been confirmed earlier this session has its trust revoked
+immediately, before whatever drain resolves it completes, since a snapshot
+write could race in during that window. Anything not in `self._confirmed`
+has its *existing* stored entry (if any) carried forward unchanged instead
+of being freshly trusted off an unverified assumption — no worse than
+before, and not actively made wrong. Upgrading past the fix does not
+retroactively clean an *already*-poisoned on-disk snapshot — clear
+`.storage/last_changed_keeper.snapshot` once after upgrading to let it
+rebuild through the now-safe resolve chain.
 
 **Service `last_changed_keeper.restore_now`** and event `last_changed_keeper_restored`
 (fired `final=False` after the initial pass, `final=True` once `_pending`

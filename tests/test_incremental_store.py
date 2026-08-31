@@ -264,8 +264,16 @@ async def test_resolve_prefers_newer_store_value_over_bulk_when_bounded(
 
 
 
-# ----- async_write_snapshot(): must not poison the store with an --------
-# ----- unconfirmed restart artifact (see _unconfirmed in __init__.py) ---
+# ----- async_write_snapshot(): trust is an ALLOWLIST (self._confirmed), --
+# ----- not a blocklist (see self._confirmed's declaration in __init__.py) -
+#
+# Merely being absent from self._unconfirmed is not enough to be trusted:
+# an entity the boot pass's grace check silently classified as "already
+# genuinely used since boot" is never added to EITHER set, and if that
+# assumption was wrong (_async_run_impl itself ran later than expected
+# relative to the true HA restart), its live.last_changed is still just a
+# raw restart artifact. Only self._confirmed - populated exclusively via
+# _mark_confirmed - is trusted.
 
 
 async def test_snapshot_write_preserves_prior_entry_for_unconfirmed_entity(
@@ -281,7 +289,7 @@ async def test_snapshot_write_preserves_prior_entry_for_unconfirmed_entity(
     job = _make_job(
         hass, snapshot={"light.kitchen": {"s": "on", "t": good_ts.isoformat()}}
     )
-    job._unconfirmed.add("light.kitchen")
+    job._mark_unconfirmed("light.kitchen")
 
     await job.async_write_snapshot()
 
@@ -296,7 +304,44 @@ async def test_snapshot_write_omits_unconfirmed_entity_with_no_prior_entry(
     than seeded with an unresolved value."""
     hass.states.async_set("light.kitchen", "on")
     job = _make_job(hass)
-    job._unconfirmed.add("light.kitchen")
+    job._mark_unconfirmed("light.kitchen")
+
+    await job.async_write_snapshot()
+
+    assert "light.kitchen" not in job._snapshot
+
+
+async def test_snapshot_write_omits_never_examined_entity_with_prior_entry(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """The direct regression test for the snapshot-poisoning bug: an entity
+    that was never touched at all this session - not in _unconfirmed (the
+    boot pass's grace check silently classified it as "already genuinely
+    used since boot" without ever examining it) and not in _confirmed
+    either - is exactly what a grace-skipped candidate looks like. It must
+    NOT be trusted just because it's absent from _unconfirmed; its existing
+    stored entry is carried forward unchanged instead."""
+    hass.states.async_set("light.kitchen", "on")
+    good_ts = dt_util.utcnow() - timedelta(days=3)
+    job = _make_job(
+        hass, snapshot={"light.kitchen": {"s": "on", "t": good_ts.isoformat()}}
+    )
+    assert "light.kitchen" not in job._unconfirmed
+    assert "light.kitchen" not in job._confirmed
+
+    await job.async_write_snapshot()
+
+    assert job._snapshot["light.kitchen"] == {"s": "on", "t": good_ts.isoformat()}
+
+
+async def test_snapshot_write_omits_never_examined_entity_with_no_prior_entry(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """Same as above, but with nothing previously stored - a grace-skipped
+    entity with no history to fall back to is simply left out, never seeded
+    from its unverified live state."""
+    hass.states.async_set("light.kitchen", "on")
+    job = _make_job(hass)
 
     await job.async_write_snapshot()
 
@@ -306,11 +351,12 @@ async def test_snapshot_write_omits_unconfirmed_entity_with_no_prior_entry(
 async def test_snapshot_write_uses_live_value_for_confirmed_entity(
     recorder_mock, hass: HomeAssistant
 ) -> None:
-    """Control case: an entity not in _unconfirmed is written from its
-    current live state as before."""
+    """An entity explicitly marked confirmed (positively verified this
+    session) is written from its current live state."""
     hass.states.async_set("light.kitchen", "on")
     live = hass.states.get("light.kitchen")
     job = _make_job(hass)
+    job._mark_confirmed("light.kitchen")
 
     await job.async_write_snapshot()
 
@@ -318,6 +364,53 @@ async def test_snapshot_write_uses_live_value_for_confirmed_entity(
         "s": "on",
         "t": live.last_changed.isoformat(),
     }
+
+
+async def test_snapshot_write_uses_live_value_after_real_apply(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """Same as above, but exercising _mark_confirmed via a real _apply()
+    call (the boot-pass/drain success path) rather than poking the set
+    directly."""
+    hass.states.async_set("light.kitchen", "on")
+    live = hass.states.get("light.kitchen")
+    ts = dt_util.utcnow() - timedelta(days=2)
+    job = _make_job(hass)
+
+    job._apply(live, ts, "light.kitchen")
+    await job.async_write_snapshot()
+
+    assert job._snapshot["light.kitchen"] == {
+        "s": "on",
+        "t": live.last_changed.isoformat(),
+    }
+
+
+async def test_reregistration_revokes_confirmed_trust_before_drain_completes(
+    recorder_mock, hass: HomeAssistant
+) -> None:
+    """An entity confirmed earlier this session that then re-registers
+    (old_state is None - a device rejoin, a config entry reload) must not
+    be snapshot-written with its fresh, unresolved re-registration
+    artifact just because it was trusted a moment ago - _mark_unconfirmed
+    must revoke that trust immediately, before the reregister drain even
+    runs, since a snapshot write could race in during the debounce
+    window."""
+    hass.states.async_set("light.kitchen", "on")
+    job = _make_job(hass)
+    job._known_targets = {"light.kitchen"}
+    job._mark_confirmed("light.kitchen")
+    assert "light.kitchen" in job._confirmed
+
+    new_state = hass.states.get("light.kitchen")
+    job._on_entity_reregistered(
+        Event("state_changed", {"old_state": None, "new_state": new_state})
+    )
+    assert "light.kitchen" not in job._confirmed
+
+    await job.async_write_snapshot()
+
+    assert "light.kitchen" not in job._snapshot
 
 
 async def test_resolve_ignores_older_store_value_when_bulk_bounded(

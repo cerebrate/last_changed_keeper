@@ -28,7 +28,9 @@ from custom_components.last_changed_keeper.const import (
     CONF_ENTITIES,
     CONF_EXCLUDE,
     DOMAIN,
+    EVENT_RESTORED,
     NEW_TARGET_SCAN_INTERVAL_SECONDS,
+    PENDING_RECOVERY_DEBOUNCE_SECONDS,
     REREGISTER_DEBOUNCE_SECONDS,
     STORAGE_KEY,
 )
@@ -47,6 +49,14 @@ async def _flush_discovery_sweep(hass: HomeAssistant) -> None:
 async def _flush_reregister_burst(hass: HomeAssistant) -> None:
     async_fire_time_changed(
         hass, dt_util.utcnow() + timedelta(seconds=REREGISTER_DEBOUNCE_SECONDS + 1)
+    )
+    await hass.async_block_till_done()
+
+
+async def _flush_pending_recovery_burst(hass: HomeAssistant) -> None:
+    async_fire_time_changed(
+        hass,
+        dt_util.utcnow() + timedelta(seconds=PENDING_RECOVERY_DEBOUNCE_SECONDS + 1),
     )
     await hass.async_block_till_done()
 
@@ -248,14 +258,19 @@ async def test_stale_unconfirmed_entity_retried_and_patched_on_later_sweep(
     assert "light.stuck_bulb" not in job._unconfirmed
 
 
-async def test_pending_entity_not_double_drained_by_unconfirmed_sweep(
-    recorder_mock, enable_custom_integrations, hass: HomeAssistant, monkeypatch
+async def test_pending_entity_retried_and_patched_by_later_sweep(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
 ) -> None:
-    """An entity unavailable at boot goes into self._pending (with its own
-    listener and RETRY_DELAYS ladder) and is also marked self._unconfirmed
-    - the unconfirmed half of the periodic sweep must not also drain it
-    concurrently, since that would just be a redundant resolve attempt
-    racing the boot-pending machinery."""
+    """An entity unavailable at boot goes into self._pending and gets one
+    recovery-triggered resolve attempt once it comes back (via the
+    boot-pending listener/_drain_pending_recovery_burst) - if that one
+    attempt fails (no usable snapshot/recorder answer yet), it must not be
+    abandoned forever: the periodic sweep no longer excludes self._pending,
+    so a later sweep tick gets another chance once a real answer becomes
+    available, e.g. once the snapshot store gains a usable entry. Success
+    there must also clear both self._pending and self._unconfirmed, and -
+    since this is the only pending entity - fire the final restored event
+    and tear down the boot-pending listener/timers."""
     hass.states.async_set("light.slow_join", "unavailable")
     entry = await _add_entry(hass)
     job = entry.runtime_data
@@ -264,18 +279,55 @@ async def test_pending_entity_not_double_drained_by_unconfirmed_sweep(
     assert "light.slow_join" in job._pending
     assert "light.slow_join" in job._unconfirmed
 
-    drain_calls: list[set[str]] = []
-    orig_drain = job._drain_unconfirmed_burst
+    events: list[dict] = []
+    hass.bus.async_listen(EVENT_RESTORED, lambda e: events.append(e.data))
 
-    async def fake_drain(entity_ids: set[str]) -> None:
-        drain_calls.append(set(entity_ids))
-        await orig_drain(entity_ids)
+    # Recovers, but with nothing yet to resolve it against - the one
+    # recovery-triggered attempt fails and leaves it stuck.
+    hass.states.async_set("light.slow_join", "on")
+    await hass.async_block_till_done()
+    await _flush_pending_recovery_burst(hass)
 
-    monkeypatch.setattr(job, "_drain_unconfirmed_burst", fake_drain)
+    assert "light.slow_join" in job._pending
+    assert "light.slow_join" in job._unconfirmed
+    assert job._unsub_listener is not None
+
+    real = dt_util.utcnow() - timedelta(days=2)
+    job._snapshot["light.slow_join"] = {"s": "on", "t": real.isoformat()}
 
     await _flush_discovery_sweep(hass)
 
-    assert drain_calls == []
+    live = hass.states.get("light.slow_join")
+    assert live.last_changed == real
+    assert "light.slow_join" not in job._pending
+    assert "light.slow_join" not in job._unconfirmed
+    assert job._unsub_listener is None
+    assert job._unsub_timers == []
+    assert events[-1]["final"] is True
+    assert events[-1]["pending"] == 0
+
+
+async def test_still_unavailable_pending_entity_not_force_patched_by_sweep(
+    recorder_mock, enable_custom_integrations, hass: HomeAssistant
+) -> None:
+    """An entity that never recovered from unavailable is left alone by the
+    periodic sweep - not force-patched, stays self._pending and
+    self._unconfirmed - its eventual recovery is still the boot-pending
+    listener's job, this sweep just no longer refuses to also help once it
+    has recovered."""
+    hass.states.async_set("light.never_joins", "unavailable")
+    entry = await _add_entry(hass)
+    job = entry.runtime_data
+    await hass.async_block_till_done()
+
+    assert "light.never_joins" in job._pending
+    assert "light.never_joins" in job._unconfirmed
+
+    await _flush_discovery_sweep(hass)  # must not raise or force-patch
+
+    assert hass.states.get("light.never_joins").state == "unavailable"
+    assert "light.never_joins" in job._pending
+    assert "light.never_joins" in job._unconfirmed
 
 
 async def test_unconfirmed_entity_gone_unavailable_is_skipped_not_crashed(

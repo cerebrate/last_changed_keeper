@@ -87,7 +87,10 @@ PENDING_RECOVERY_MAX_WAIT_SECONDS = 10
 # this integration has; and (2) entities that already existed but whose
 # resolve attempt simply failed (self._unconfirmed) and would otherwise be
 # abandoned forever, since nothing else ever revisits an already-known
-# entity once its one resolve attempt has failed.
+# entity once its one resolve attempt has failed - including one that was
+# unavailable/unknown at boot (self._pending): its own retry ladder
+# (RETRY_DELAYS, max 180s) always finishes well before this timer's first
+# tick, so this sweep also covers it once that ladder gives up.
 NEW_TARGET_SCAN_INTERVAL_SECONDS = 300
 
 EVENT_RESTORED = f"{DOMAIN}_restored"
