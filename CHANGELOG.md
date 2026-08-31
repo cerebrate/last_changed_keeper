@@ -2,6 +2,103 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.9] — 2026-08-30
+### Fixed
+- **The periodic sweep added in 0.9.8 excluded anything currently in
+  `self._pending`, silently recreating the exact "abandoned after one
+  failed resolve" gap 0.9.8 was meant to close — just for the boot-pending
+  population instead of the general unconfirmed one.** `self._pending` is
+  only ever populated during the initial boot pass and never regrows
+  afterward; an entity that recovers from unavailable to a real value gets
+  exactly one resolve attempt (the debounced recovery listener, or the
+  fixed `RETRY_DELAYS` ladder, ~30/90/180s) and, if that one attempt fails
+  — plausible on a recorder cold-start race — stayed in `self._pending`
+  forever with nothing left to retry it, since the periodic sweep's `stale
+  = self._unconfirmed - new_targets - self._pending` computation excluded
+  it by construction.
+
+  Field-diagnosed on the same ~3,500-entity installation, several days
+  into running 0.9.8: 685 `verify` mismatches remained, and for every one
+  still sitting at that boot's own raw restart timestamp, `verify`'s
+  freshly computed answer exactly matched what was already sitting in the
+  snapshot store — the correct value had been available the whole time,
+  nothing had ever asked for it again.
+
+  Drops the `self._pending` exclusion: `NEW_TARGET_SCAN_INTERVAL_SECONDS`
+  (300s) is longer than the boot-time retry ladder's maximum delay (180s),
+  so this sweep's first tick can never fire while that ladder is still
+  active, and `_drain_unconfirmed_burst`'s own per-entity live-state check
+  already skips anything genuinely still unavailable at zero recorder
+  cost. A resolve that now succeeds for a still-`_pending` entity also
+  clears its `_pending` bookkeeping (see `_resolve_candidates`), so the
+  boot job's "final restored" event and listener teardown — which only
+  fire once `_pending` is fully empty — are no longer permanently stuck
+  behind an entity nothing was ever going to revisit.
+
+- **`async_write_snapshot` trusted any entity merely *absent* from
+  `self._unconfirmed` as ground truth, but an entity the boot pass's grace
+  check silently classified as "already genuinely used since boot" was
+  never added to that set at all — it received zero tracking, positive or
+  negative.** That classification only holds if `_async_run_impl` itself
+  runs shortly after the true HA restart; if it runs late (a slow recorder
+  migration, general startup congestion — plausible right after an
+  HA/integration upgrade), a still-pristine restart-artifact entity slips
+  through untracked, and the very next periodic (6h) or shutdown snapshot
+  write confirms that artifact into the snapshot as ground truth —
+  permanently, since nothing ever re-checks an already-"confirmed" entity
+  again.
+
+  Field-diagnosed on the same installation by cross-referencing the live
+  `verify` mismatches against the on-disk snapshot store directly: the
+  store held single-minute clusters of 578, 220, 200, 106, 78, 64, 33 and
+  23 entities each — restart-artifact shaped, not real per-entity history
+  — and 272 of the 685 current mismatches matched a snapshot entry
+  exactly. One cluster (78 entities) landed at the exact run in
+  `last_changed_keeper.runs` where the `BULK_PER_ENTITY_LIMIT` migration
+  shows up — an upgrade event, exactly the kind of moment startup
+  congestion is most likely.
+
+  Flips snapshot-write trust from a blocklist to an allowlist: a new
+  `self._confirmed` set, populated only by positive evidence (a
+  successful `_resolve()`+`_apply()`, or a genuine value transition
+  observed by the incremental listener) via two small `_mark_confirmed`/
+  `_mark_unconfirmed` helpers that keep it and `self._unconfirmed` from
+  drifting out of sync, is now the *only* thing `async_write_snapshot`
+  trusts. Everything else — including a grace-skipped entity that was
+  never examined at all — carries forward whatever is already on disk
+  instead of being freshly trusted off an unverified assumption. Does not
+  retroactively clean an already-poisoned on-disk snapshot; clear
+  `.storage/last_changed_keeper.snapshot` once after upgrading to let it
+  rebuild through the now-safe resolve chain.
+
+- **The boot pass could start querying the recorder before the recorder
+  was genuinely ready, not just "set up."** `manifest.json`'s `recorder`
+  dependency only guarantees `Recorder.async_db_ready` has resolved (DB
+  connected, non-live migration done) before this integration's own setup
+  runs. A *live* schema migration — needed after most HA core upgrades —
+  is deliberately deferred by the recorder itself until *after* HA reports
+  "started," specifically so it doesn't compete with startup CPU load —
+  which is exactly the same moment this integration's own boot trigger
+  (`async_at_started`) fires. Without a wait, the boot pass's recorder-heavy
+  bulk/deep queries would run directly against a mid-migration recorder,
+  competing for the same executor/DB the migration was deferred to avoid
+  competing with — plausibly explaining the field install's abnormally
+  long (~30 minute) boot pass, and giving the "why would `_async_run_impl`
+  run late relative to the true restart" scenario behind the
+  snapshot-poisoning fix above a concrete, recurring mechanism rather than
+  a hand-waved one.
+
+  Adds a bounded wait for `Recorder.async_recorder_ready` (an
+  `asyncio.Event`, distinct from `async_db_ready`, only set once all
+  migration steps genuinely finish) at the start of `async_run()` — the
+  boot-only wrapper; `restore_now`'s service handler calls
+  `_async_run_impl` directly and is unaffected. Bounded rather than
+  unconditional because a *failed* live migration never sets the
+  readiness signal at all; on timeout (`RECORDER_READY_TIMEOUT_SECONDS`,
+  a generous default given large/low-power installs have been reported
+  taking up to an hour for such a migration) the boot pass proceeds
+  anyway rather than hanging forever.
+
 ## [0.9.8] — 2026-08-22
 ### Fixed
 - **An entity that had a live value at boot but simply failed to resolve

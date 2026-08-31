@@ -128,6 +128,7 @@ from .const import (
     PENDING_RECOVERY_DEBOUNCE_SECONDS,
     PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
+    RECORDER_READY_TIMEOUT_SECONDS,
     REREGISTER_DEBOUNCE_SECONDS,
     REREGISTER_MAX_WAIT_SECONDS,
     RETRY_DELAYS,
@@ -339,6 +340,21 @@ class _RestoreJob:
         # been able to patch) — see async_write_snapshot, which must not
         # persist these into the snapshot store as if they were real.
         self._unconfirmed: set[str] = set()
+
+        # Entities positively verified this session: either successfully
+        # _resolve()-and-_apply()'d, or observed by the incremental listener
+        # to undergo a genuine value transition. The ONLY thing
+        # async_write_snapshot trusts as ground truth — an entity that was
+        # merely never flagged self._unconfirmed (e.g. the boot pass's grace
+        # check assumed it was "already genuinely used since boot" without
+        # ever actually examining it) is NOT enough; that assumption can be
+        # wrong if _async_run_impl itself runs late relative to the true HA
+        # restart (recorder migration, startup congestion), and trusting it
+        # anyway is exactly how a raw restart artifact gets permanently
+        # baked into the snapshot as if it were real. Always mutated via
+        # _mark_confirmed/_mark_unconfirmed below, never directly, so this
+        # set and self._unconfirmed can never drift out of sync.
+        self._confirmed: set[str] = set()
 
         # ----- Feature: rolling run history + boot self-check --------------
         # runs_store is None in direct unit-test construction; persistence is
@@ -552,16 +568,27 @@ class _RestoreJob:
         boot (see _resolve) — otherwise it could stamp the *previous* value's
         last_changed onto a genuinely new value.
 
-        For an entity still in _unconfirmed (a restart candidate this
-        session that _resolve() has never managed to patch), live.last_changed
-        is itself just this restart's raw reset value, not a real timestamp —
-        writing it here would poison the snapshot with that artifact, and
-        _resolve's step 2 would then confidently reapply it on every future
-        boot (comfortably clearing the margin check against each new restart's
-        fresher cutoff) without ever reaching the deep/best-effort steps that
-        would find the real answer. So an unconfirmed entity's *existing*
-        stored entry (if any) is carried forward unchanged instead — no worse
-        than before, and not actively made wrong.
+        Trust is an ALLOWLIST, not a blocklist: only an entity in
+        self._confirmed (positively verified this session — see its
+        declaration comment and _mark_confirmed/_mark_unconfirmed) is
+        written from its current live state. Merely being absent from
+        self._unconfirmed is NOT enough — an entity the boot pass's grace
+        check silently classified as "already genuinely used since boot"
+        (__init__.py's candidate-building loop) is never added to either
+        set, and if that classification was wrong (_async_run_impl itself
+        ran later than expected relative to the true HA restart — a slow
+        recorder migration or general startup congestion, e.g. right after
+        an upgrade, is plausible), live.last_changed there is still just
+        this restart's raw reset value, not a real timestamp. Trusting it
+        anyway would poison the snapshot with that artifact, and _resolve's
+        step 2 would then confidently reapply it on every future boot
+        (comfortably clearing the margin check against each new restart's
+        fresher cutoff) without ever reaching the deep/best-effort steps
+        that would find the real answer — permanently, since nothing before
+        this ever re-checked an already-"confirmed" entity. So anything not
+        in self._confirmed has its *existing* stored entry (if any) carried
+        forward unchanged instead — no worse than before, and not actively
+        made wrong.
 
         Used both as the EVENT_HOMEASSISTANT_STOP listener (receives an
         Event) and as the periodic snapshot timer (receives a datetime) —
@@ -573,12 +600,12 @@ class _RestoreJob:
             live = self.hass.states.get(entity_id)
             if live is None or live.state in INVALID_STATES:
                 continue
-            if entity_id in self._unconfirmed:
-                prior = self._snapshot.get(entity_id)
-                if prior is not None:
-                    data[entity_id] = prior
+            if entity_id in self._confirmed:
+                data[entity_id] = {"s": live.state, "t": live.last_changed.isoformat()}
                 continue
-            data[entity_id] = {"s": live.state, "t": live.last_changed.isoformat()}
+            prior = self._snapshot.get(entity_id)
+            if prior is not None:
+                data[entity_id] = prior
         await self._store.async_save(data)
         # Keep the in-memory copy in sync with what's on disk: this is also
         # what naturally bounds the incremental store's size (see
@@ -592,10 +619,55 @@ class _RestoreJob:
     async def async_run(self, *, single_pass: bool = False) -> int:
         """Guarded run: an exception must not kill the HA start."""
         try:
+            await self._wait_for_recorder_ready()
             return await self._async_run_impl(single_pass=single_pass)
         except Exception:
             _LOGGER.exception("Last Changed Keeper: async_run failed")
             return 0
+
+    async def _wait_for_recorder_ready(self) -> None:
+        """Wait for the recorder to be genuinely ready before the boot pass
+        runs its own recorder-heavy bulk/deep queries against it.
+
+        manifest.json's "recorder" dependency only guarantees recorder's
+        own async_setup() has returned, which is gated on
+        Recorder.async_db_ready — resolved once the DB is connected and
+        any NON-live migration is done. A *live* migration (the kind
+        needed after most HA core upgrades) is deliberately deferred by
+        the recorder itself until AFTER HA reports "started" ("we do not
+        want it to compete with startup which is also cpu intensive") —
+        i.e. exactly the same moment this integration's own boot trigger,
+        async_at_started, fires. Without this wait, a live migration in
+        progress means our bulk/deep queries compete with it for the same
+        executor/DB, both slowing the boot pass down dramatically and
+        making a late (>grace) _async_run_impl invocation — and the
+        snapshot poisoning that can follow from it (see self._confirmed) —
+        a real, common scenario rather than a hypothetical one.
+
+        Recorder.async_recorder_ready (an asyncio.Event, distinct from
+        async_db_ready) is only set once migration is genuinely finished.
+        It's bounded with a generous timeout rather than awaited
+        unconditionally because a failed live migration never sets it at
+        all — unconditionally awaiting it would then hang this
+        integration's boot pass forever over an unrelated recorder
+        failure. On timeout, proceed anyway: querying a possibly-busy
+        recorder is still better than never running at all.
+        """
+        try:
+            instance = get_instance(self.hass)
+        except Exception:  # noqa: BLE001 - recorder must not kill anything
+            return
+        try:
+            await asyncio.wait_for(
+                instance.async_recorder_ready.wait(),
+                timeout=RECORDER_READY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            _LOGGER.warning(
+                "Last Changed Keeper: recorder still not ready after %ds "
+                "(migration or startup congestion?) - proceeding anyway",
+                RECORDER_READY_TIMEOUT_SECONDS,
+            )
 
     async def _async_run_impl(self, *, single_pass: bool = False) -> int:
         """Initial pass (with bulk query). Sets up listener + re-runs."""
@@ -651,7 +723,7 @@ class _RestoreJob:
             live = self.hass.states.get(entity_id)
             if live is None or live.state in INVALID_STATES:
                 self._pending.add(entity_id)
-                self._unconfirmed.add(entity_id)
+                self._mark_unconfirmed(entity_id)
                 continue
             if (dt_util.utcnow() - live.last_changed).total_seconds() > grace:
                 continue  # already really used since boot
@@ -691,12 +763,12 @@ class _RestoreJob:
                 live = self.hass.states.get(entity_id)
                 if live is None or live.state in INVALID_STATES:
                     self._pending.add(entity_id)
-                    self._unconfirmed.add(entity_id)
+                    self._mark_unconfirmed(entity_id)
                     continue
                 if live.last_changed != candidate_last_changed[entity_id]:
                     # Changed for real while we were awaiting the query — this
                     # last_changed reflects genuine usage, not an artifact.
-                    self._unconfirmed.discard(entity_id)
+                    self._mark_confirmed(entity_id)
                     continue
                 if await self._maybe_restore_last_triggered(entity_id):
                     patched_triggered += 1
@@ -709,7 +781,7 @@ class _RestoreJob:
                     # still this restart's raw reset value. Tracked so
                     # async_write_snapshot doesn't persist it as if it were
                     # real (see _unconfirmed).
-                    self._unconfirmed.add(entity_id)
+                    self._mark_unconfirmed(entity_id)
             del bulk  # released before the next batch is fetched
 
         # Resolve a stale repair issue once the cache patch works again
@@ -1224,10 +1296,29 @@ class _RestoreJob:
             result = {}
             await asyncio.sleep(0)
 
+    # ----- Confirmed/unconfirmed bookkeeping ------------------------------
+
+    @callback
+    def _mark_unconfirmed(self, entity_id: str) -> None:
+        """entity_id's live last_changed is a suspect/unverified value:
+        mark it retry-worthy and revoke any earlier positive verification,
+        so async_write_snapshot won't trust it again until it's
+        re-verified (see self._confirmed's declaration comment)."""
+        self._unconfirmed.add(entity_id)
+        self._confirmed.discard(entity_id)
+
+    @callback
+    def _mark_confirmed(self, entity_id: str) -> None:
+        """entity_id's live last_changed is positively verified this
+        session (resolved+applied, or a genuine value transition was
+        observed) — the only thing async_write_snapshot trusts."""
+        self._unconfirmed.discard(entity_id)
+        self._confirmed.add(entity_id)
+
     # ----- Applying ------------------------------------------------------
 
     def _apply(self, live: State, ts: datetime, entity_id: str) -> None:
-        self._unconfirmed.discard(entity_id)
+        self._mark_confirmed(entity_id)
         ok = _apply_last_changed(live, ts, self._also_updated)
         if not ok and not self._degraded:
             self._degraded = True
@@ -1367,7 +1458,7 @@ class _RestoreJob:
         # entity sits in the debounce window, and a snapshot write racing in
         # during that window (e.g. HA shutting down mid-debounce) must not
         # persist it as if it were real. _apply() clears this on success.
-        self._unconfirmed.add(entity_id)
+        self._mark_unconfirmed(entity_id)
         self._reregister_burst.add(entity_id)
         now = dt_util.utcnow()
         if self._reregister_burst_since is None:
@@ -1408,11 +1499,19 @@ class _RestoreJob:
         _drain_unconfirmed_burst (candidates NOT grace-filtered: membership
         in self._unconfirmed is itself the trust signal that an entity's
         live last_changed is still fake, regardless of how old that artifact
-        now looks by wall-clock time). on_unresolved, when given, lets the
-        caller arm its own retry mechanism for anything still unresolved
-        (e.g. the reregistration retry ladder) — the unconfirmed sweep has
-        no equivalent, since an unresolved entity simply stays in
-        self._unconfirmed for the next periodic sweep to retry.
+        now looks by wall-clock time — including entities still sitting in
+        self._pending, which this sweep is no longer excluded from: the
+        boot-time retry ladder (RETRY_DELAYS, max 180s) always finishes
+        before this sweep's own interval, NEW_TARGET_SCAN_INTERVAL_SECONDS
+        (300s), can even tick once, so there's no realistic overlap with the
+        boot-pending machinery). on_unresolved, when given, lets the caller
+        arm its own retry mechanism for anything still unresolved (e.g. the
+        reregistration retry ladder) — the unconfirmed sweep has no
+        equivalent, since an unresolved entity simply stays in
+        self._unconfirmed for the next periodic sweep to retry. A resolved
+        entity still sitting in self._pending (i.e. one whose boot-time
+        retry ladder gave up before its resolve finally succeeded here) is
+        also cleared out of that bookkeeping, since nothing else will.
         """
         async for chunk, bulk in self._iter_bulk_batches(candidates):
             for entity_id in chunk:
@@ -1424,17 +1523,20 @@ class _RestoreJob:
                 if live is None or live.state in INVALID_STATES:
                     continue
                 if live.last_changed != candidate_last_changed[entity_id]:
-                    self._unconfirmed.discard(entity_id)
+                    self._mark_confirmed(entity_id)
                     continue
                 await self._maybe_restore_last_triggered(entity_id)
                 ts = await self._resolve(entity_id, live, bulk.get(entity_id))
                 if ts is not None:
                     self._apply(live, ts, entity_id)
                     _LOGGER.debug("%s: re-patched by batched drain", entity_id)
+                    if entity_id in self._pending:
+                        self._pending.discard(entity_id)
+                        self._cleanup_if_done()
                 else:
                     # Unresolved: live.last_changed is still a raw reset
                     # artifact — see _unconfirmed.
-                    self._unconfirmed.add(entity_id)
+                    self._mark_unconfirmed(entity_id)
                     if on_unresolved is not None:
                         on_unresolved(entity_id)
             del bulk  # released before the next batch is fetched
@@ -1476,6 +1578,14 @@ class _RestoreJob:
         would ever retry it again — its live last_changed stops looking
         "fresh" the moment wall-clock time drifts past grace, even though
         it's still exactly as fake as it was at boot.
+
+        entity_ids may include entities still in self._pending (unlike
+        earlier versions, this is no longer excluded) — an entity whose
+        boot-time retry ladder exhausted before it recovered to a valid
+        state, or whose one recovery-triggered resolve attempt simply
+        failed, would otherwise sit in self._pending forever with nothing
+        left to retry it. _resolve_candidates clears the matching _pending
+        entry on success.
 
         No fast retry ladder is armed for anything still unresolved here:
         the next periodic sweep will simply pick it up again, since it
@@ -1524,7 +1634,7 @@ class _RestoreJob:
         if ts is None:
             # Unresolved: live.last_changed is still this re-registration's
             # raw reset value — see _unconfirmed.
-            self._unconfirmed.add(entity_id)
+            self._mark_unconfirmed(entity_id)
             return _RETRY_WORTHWHILE
         self._apply(live, ts, entity_id)
         _LOGGER.debug("%s: re-patched after runtime re-registration", entity_id)
@@ -1602,24 +1712,31 @@ class _RestoreJob:
         start from a live last_changed that is a raw reset/creation
         artifact, not a real value).
 
-        2. Still-unconfirmed existing targets. A candidate that already
-        existed at boot (or was already swept in) but whose resolve attempt
-        simply failed — e.g. a recorder cold-start race on a large install,
-        where the true answer only becomes queryable a few minutes after
-        boot — is otherwise abandoned forever: unlike a boot-pending entity
-        (self._pending, unavailable/unknown at boot) it never got a retry
-        ladder in the first place, and nothing else ever revisits it unless
-        its value genuinely changes or it's fully re-registered, neither of
-        which happens for the largely-static diagnostic/config entities
-        this hits hardest. self._unconfirmed is the durable, always-correct
-        signal for exactly this: set on every resolve failure, reliably
-        cleared the moment an entity is genuinely patched or genuinely
-        changes value (_apply, the incremental listener). This half of the
-        sweep re-attempts everything still in self._unconfirmed via
-        _drain_unconfirmed_burst, excluding anything currently in
-        self._pending (already being actively chased by the boot-pending
-        listener/retry ladder, so sweeping it here too would just be a
-        redundant, concurrent resolve attempt for the same entity).
+        2. Still-unconfirmed existing targets, INCLUDING ones still in
+        self._pending. A candidate that already existed at boot (or was
+        already swept in) but whose resolve attempt simply failed — e.g. a
+        recorder cold-start race on a large install, where the true answer
+        only becomes queryable a few minutes after boot — is otherwise
+        abandoned forever: it never got a retry ladder in the first place
+        (or, for a boot-pending entity, its one retry ladder/recovery
+        listener attempt already exhausted), and nothing else ever revisits
+        it unless its value genuinely changes or it's fully re-registered,
+        neither of which happens for the largely-static diagnostic/config
+        entities this hits hardest. self._unconfirmed is the durable,
+        always-correct signal for exactly this: set on every resolve
+        failure, reliably cleared the moment an entity is genuinely patched
+        or genuinely changes value (_apply, the incremental listener). This
+        half of the sweep re-attempts everything still in self._unconfirmed
+        via _drain_unconfirmed_burst — no longer excluding self._pending
+        members: NEW_TARGET_SCAN_INTERVAL_SECONDS (300s) is longer than the
+        boot-time retry ladder's maximum delay (RETRY_DELAYS tops out at
+        180s), so this sweep's first tick can never fire while that ladder
+        is still active, and _drain_unconfirmed_burst's own per-entity
+        live-state check already skips anything genuinely still
+        unavailable at zero recorder cost. A resolve that succeeds here for
+        a still-_pending entity also clears its _pending bookkeeping (see
+        _resolve_candidates) — otherwise that entity's boot-pending job
+        could never reach its "final" finalization.
 
         async_verify doesn't have either gap since it re-resolves every
         current target fresh, with no grace/pending gating, on every call —
@@ -1636,11 +1753,15 @@ class _RestoreJob:
             # _on_entity_reregistered: a snapshot write racing in before the
             # drain below completes must not persist these entities'
             # current (first-creation-time) last_changed as if it were
-            # real.
+            # real. Bulk equivalent of _mark_unconfirmed: new_targets can't
+            # already be in self._confirmed (they weren't even in
+            # self._known_targets a moment ago), so there's nothing to
+            # revoke, just the matching bulk discard for consistency.
             self._unconfirmed |= new_targets
+            self._confirmed -= new_targets
             self.hass.async_create_task(self._drain_reregister_burst(new_targets))
 
-        stale = self._unconfirmed - new_targets - self._pending
+        stale = self._unconfirmed - new_targets
         if stale:
             self.hass.async_create_task(self._drain_unconfirmed_burst(stale))
 
@@ -1693,7 +1814,7 @@ class _RestoreJob:
             return
         if old.state in INVALID_STATES:
             return  # recovery from unavailable/unknown, not a genuine change
-        self._unconfirmed.discard(new.entity_id)
+        self._mark_confirmed(new.entity_id)
         self._dirty[new.entity_id] = {
             "s": new.state,
             "t": new.last_changed.isoformat(),
