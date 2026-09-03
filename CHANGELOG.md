@@ -2,7 +2,7 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.10] — 2026-09-03
+## [0.9.11] — 2026-09-03
 ### Fixed
 - **A recorder history query could miss a state change that had already
   happened — visible via `hass.states.get()` — but hadn't been committed
