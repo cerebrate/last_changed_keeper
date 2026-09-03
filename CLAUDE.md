@@ -65,6 +65,42 @@ then hang the boot pass forever over an unrelated recorder failure. On
 timeout, the boot pass proceeds anyway (logged as a warning): querying a
 possibly-busy recorder is still better than never running at all.
 
+**Every individual recorder history query** — each bulk batch
+(`_iter_bulk_batches`) and each per-entity deep/`last_triggered` query
+(`_resolve` step 3, `_resolve_last_triggered`) — is preceded by
+`_wait_for_recorder_commit()`, a *separate* concern from
+`_wait_for_recorder_ready()` above: that one is a one-time boot gate for
+migration completion; this one guards ordinary recorder **commit lag** on
+every single query, boot or not. Recorder writes are queued and committed
+asynchronously, so a state change can already be visible via
+`hass.states.get()` before it's queryable via `history`/
+`get_last_state_changes()`. `_resolve`'s "bounded" trust (see its
+docstring) treats the instant a query returns any older, differently-valued
+row as definitive, with no protection — unlike the unbounded path's
+`_near_purge_boundary` — against the query having simply run ahead of the
+recorder's own write queue; if the most recent transition genuinely hasn't
+committed yet, a bounded query confidently returns the *previous* boundary
+instead, wrong but indistinguishable from a correct bounded result at the
+call site. Field evidence: a real door sensor's `verify`-computed
+`expected_last_changed` matched a transition from the previous evening,
+even though the door had genuinely, physically reopened and closed again 3
+seconds before the query that produced that answer — and because a bounded
+resolve is trusted unconditionally, an entity hit by this at boot time gets
+`_apply()`'d once, marked `_confirmed`, and (since only `_unconfirmed`
+entities are ever revisited — see the periodic sweep below) is never
+looked at again, sitting wrong until the next full restart.
+`_wait_for_recorder_commit()` calls `Recorder.async_get_commit_future()`
+(the same mechanism HA core's own live-history websocket API uses before
+querying) and awaits it with a short, bounded timeout
+(`RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS`) — short rather than generous like
+the readiness wait above, since this can be hit many times within a single
+pass (once per batch, once per deep query) and a long per-call timeout
+would risk compounding into a much longer pass under sustained load,
+whereas this guards an ordinary sub-second-to-few-second race, not a
+one-time migration. It costs nothing in the common case: the write queue
+is usually already empty, and `async_get_commit_future()` returns `None`
+immediately when so.
+
 **Core flow (`_RestoreJob._async_run_impl`, boot pass):**
 1. Resolve targets via `resolve_targets()` (domains/entities/labels/areas minus
    exclude, or literally every entity if "all_entities" is on) — this function is
@@ -109,6 +145,21 @@ possibly-busy recorder is still better than never running at all.
    "bounded" run (recorder history shows an older, different value) is
    definitive; an "unbounded" one (history exhausted) is only trusted under
    specific conditions — see the docstrings on `_resolve` and `_real_last_changed`.
+   `_real_last_changed` also reports *why* a run is bounded: a genuine
+   differing value proves the value really did just change and is trusted
+   unconditionally even when too recent to clear `MARGIN_SECONDS` (no other
+   source may override it); a `None`-state (entity removal) row — written
+   on every `Entity.async_remove()`, i.e. every config-entry reload/device
+   rejoin, exactly the case the re-registration listener exists to fix —
+   only proves the entity briefly didn't exist, not that its value
+   changed, so a boundary that's *both* removal-caused *and* too recent
+   (this session's own re-registration, not some older entity-id-reuse
+   boundary) is inconclusive rather than a hard block, and `_resolve` falls
+   through to the snapshot/deep/best-effort sources below instead. Without
+   this distinction a fast reload would leave the entity permanently
+   `_unconfirmed` — the bulk history behind the block never changes, so
+   every later retry recomputes the identical wrong answer — worse off
+   than never fixing the query race in the first place.
    One of those conditions is `_near_purge_boundary`: every HA restart writes
    a fresh recorder row for each entity even when its value hasn't changed
    (the live in-place `last_changed` patch never gets written back to the

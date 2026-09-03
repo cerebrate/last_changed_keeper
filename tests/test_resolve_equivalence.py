@@ -158,7 +158,7 @@ async def test_change_beyond_bulk_window_falls_through_to_real_deep_query(
     # older/differing within the window, so _real_last_changed correctly
     # calls it unbounded rather than mistaking it for a definitive answer.
     async for _chunk, bulk in job._iter_bulk_batches(["light.beyond_window"]):
-        _bulk_ts, bulk_bounded = lck._real_last_changed(
+        _bulk_ts, bulk_bounded, _ = lck._real_last_changed(
             bulk.get("light.beyond_window") or [], "on"
         )
         assert not bulk_bounded, "test setup: change must be outside the bulk window"
