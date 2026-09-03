@@ -2,6 +2,19 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.10] — 2026-09-03
+### Fixed
+- **Reconfigure no longer reloads the entry twice.** The reconfigure step
+  called `async_update_reload_and_abort()`, which schedules its own reload
+  on top of the config-entry update listener already registered in
+  `async_setup_entry` — the listener reloads on *any* data/options change,
+  so every reconfigure save reloaded the integration twice back-to-back
+  (and, per Home Assistant's own docs, could race). Switched to
+  `async_update_and_abort()`, which updates the entry and lets the existing
+  listener drive the single reload. Combining a config-entry listener with
+  a config-flow reloading method has been deprecated since HA Core 2026.6
+  and turns into a hard error from 2026.12 onward.
+
 ## [0.9.9] — 2026-08-30
 ### Fixed
 - **The periodic sweep added in 0.9.8 excluded anything currently in

@@ -1,7 +1,7 @@
 # Last Changed Keeper
 
 [![Validate](https://github.com/hiSweid/last_changed_keeper/actions/workflows/validate.yml/badge.svg)](https://github.com/hiSweid/last_changed_keeper/actions/workflows/validate.yml)
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz)
 ![Version](https://img.shields.io/github/v/release/hiSweid/last_changed_keeper?label=version)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.11%2B-blue.svg)
 
@@ -72,11 +72,15 @@ toggle (default: on).
 
 ## Installation (HACS)
 
+Last Changed Keeper is part of the **HACS default store** — no custom
+repository needed.
+
 [![Open in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=hiSweid&repository=last_changed_keeper&category=integration)
 
-1. Click the badge above (or HACS → Integrations → ⋮ → *Custom repositories* →
-   this repo, category *Integration*).
-2. Install, restart Home Assistant.
+1. Click the badge above to open the repository directly in your own HACS,
+   or find it by searching for "Last Changed Keeper" in HACS → Integrations
+   → *Explore & download repositories*.
+2. Download it, restart Home Assistant.
 3. *Settings → Devices & Services → Add Integration* → "Last Changed Keeper".
 
 ## Configuration
