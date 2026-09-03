@@ -2,6 +2,81 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.10] — 2026-09-03
+### Fixed
+- **A recorder history query could miss a state change that had already
+  happened — visible via `hass.states.get()` — but hadn't been committed
+  to the database yet, and `_resolve()`'s "bounded" result is trusted
+  unconditionally the instant it finds any older, differently-valued row,
+  with no protection against the query simply having run ahead of the
+  recorder's own write queue.** Recorder writes are queued and committed
+  asynchronously rather than synchronously with the in-memory state
+  change (ordinary commit lag), so a query issued immediately after a
+  genuine transition can silently see a stale, older boundary instead —
+  wrong, but indistinguishable from a correct bounded result at the call
+  site. An entity hit by this at boot gets `_apply()`'d once, marked
+  `_confirmed`, and — since only `_unconfirmed` entities are ever
+  revisited by the periodic sweep — sits wrong until the next full
+  restart, with nothing to retry it.
+
+  Field-diagnosed on the same installation after 0.9.9 (which fixed the
+  two prior bugs cleanly — 685 mismatches down to 92 at first post-deploy
+  `verify`): a `verify` dump six hours later, no restart in between, had
+  crept back up to 117. Cross-referencing that dump against the install's
+  own log found a real door sensor whose `verify`-computed
+  `expected_last_changed` matched a transition from the previous evening,
+  even though the door had genuinely, physically reopened and closed
+  again 3 seconds before the query that produced that answer — proof the
+  query ran ahead of the recorder's commit, not that the door was
+  actually still in its earlier state. The same log also showed most of
+  that 117 was a separate, non-bug artifact: entities being correctly,
+  repeatedly re-patched throughout the run (one 73 times) that `verify`
+  still reported as mismatched simply because `verify`'s own multi-minute
+  scan reads each entity's live value at whatever point it reaches it,
+  not atomically at report time — this fix, sharing the same query path,
+  also reduces that false-positive noise.
+
+  Adds `_wait_for_recorder_commit()`, called before every recorder
+  history query this integration issues (each bulk batch, each per-entity
+  deep/`last_triggered` query) — the same `Recorder.async_get_commit_
+  future()` mechanism HA core's own live-history websocket API uses
+  before querying, bounded by a short `RECORDER_COMMIT_WAIT_TIMEOUT_
+  SECONDS` timeout (distinct from and much shorter than 0.9.9's boot-time
+  `RECORDER_READY_TIMEOUT_SECONDS`, since this guards an ordinary
+  sub-second-to-few-second race that can be hit many times within a
+  single pass, not a one-time migration gate). Costs nothing in the
+  common case: the write queue is usually already empty, and the call
+  returns immediately when so.
+
+- **A fast re-registration could permanently block `_resolve()` from ever
+  falling through to the snapshot, making the entity worse off than before
+  the fix above.** `Entity.async_remove()` — called on every config-entry
+  reload or device rejoin, exactly the case the re-registration listener
+  exists to fix — makes the recorder write a `None`-state row for the
+  removal, and `_real_last_changed` already (correctly, deliberately)
+  treats that row as a genuine boundary the same as any differing value.
+  But `_resolve()`'s bounded-result trust doesn't distinguish *why* a
+  result is bounded: a boundary that's too recent to clear the margin is
+  hard-blocked (`return None`) on the assumption that a genuine value
+  transition was proven, so no other source may override it. A removal
+  boundary proves no such thing — it only proves the entity briefly didn't
+  exist — yet a fast reload (well under `MARGIN_SECONDS`) was hitting the
+  same hard block, and since the bulk history behind that block never
+  changes, every later retry (`RETRY_DELAYS`, the periodic sweep)
+  recomputed the identical answer forever: permanently `_unconfirmed`,
+  never reaching the snapshot fallback that would otherwise have restored
+  it correctly.
+
+  Found while shipping the fix above: making history queries commit-lag-
+  safe means the bulk query now reliably sees the removal row it used to
+  sometimes race past, which is what turned this from a latent gap into
+  two failing regression tests. `_real_last_changed` now reports *why* a
+  result is bounded (`bounded_by_removal`); `_resolve` still trusts a
+  too-recent genuine value transition unconditionally (that part was
+  always correct), but treats a too-recent removal boundary as
+  inconclusive and falls through to the snapshot/deep/best-effort sources
+  below instead.
+
 ## [0.9.9] — 2026-08-30
 ### Fixed
 - **The periodic sweep added in 0.9.8 excluded anything currently in

@@ -128,6 +128,7 @@ from .const import (
     PENDING_RECOVERY_DEBOUNCE_SECONDS,
     PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
+    RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS,
     RECORDER_READY_TIMEOUT_SECONDS,
     REREGISTER_DEBOUNCE_SECONDS,
     REREGISTER_MAX_WAIT_SECONDS,
@@ -669,6 +670,70 @@ class _RestoreJob:
                 RECORDER_READY_TIMEOUT_SECONDS,
             )
 
+    async def _wait_for_recorder_commit(self) -> bool:
+        """Flush the recorder's own write queue before querying history, so
+        a query can never silently miss a row that's already visible via
+        hass.states.get() but not yet committed to the database (recorder
+        commit lag).
+
+        _resolve's "bounded" trust (see its docstring) treats the instant a
+        query returns any older, differently-valued row as definitive, with
+        no protection — unlike the unbounded path's _near_purge_boundary —
+        against the query simply having run ahead of the recorder's own
+        queue. If the most recent transition genuinely hasn't been
+        committed yet, a bounded query confidently returns the *previous*
+        boundary instead: wrong, but indistinguishable from a correct
+        bounded result at the call site. Field evidence: a real door
+        sensor's expected_last_changed matched a transition from the
+        previous evening, even though the door had genuinely, physically
+        reopened and closed again 3 seconds before the query that produced
+        that answer. Most likely right after boot (a burst of restart-time
+        writes queued at once) but not boot-exclusive — any query racing a
+        very recent write is at risk, which is why this is called from
+        every history query site rather than gated to the boot pass the
+        way _wait_for_recorder_ready is.
+
+        Recorder.async_get_commit_future returns None immediately when the
+        write queue is already empty (the common case, by far), so this
+        costs nothing apart from the cases it exists to catch. Bounded with
+        a short timeout: if the queue is genuinely stuck rather than just
+        busy, every other recorder-backed query this integration makes is
+        already broken, and querying anyway is still better than hanging
+        this one indefinitely.
+
+        Returns False (checked both before and after the wait, since the
+        wait itself takes real time and can straddle the moment shutdown
+        begins) if hass is stopping — the caller must then skip its query
+        rather than dispatch new recorder work against a recorder that may
+        already be disposing its connection. HA's own recorder shutdown
+        deliberately closes the connection before forcibly joining any
+        still-running query thread (core.py's _shutdown: "we shutdown the
+        executor without forcefully joining the threads until after we
+        have tried to cleanly close the connection"), trusting a normally-
+        brief in-flight query to finish or be interrupted cleanly in that
+        window; a query we could have avoided starting in the first place
+        by checking here shouldn't be made to rely on that.
+        """
+        if self.hass.is_stopping:
+            return False
+        try:
+            instance = get_instance(self.hass)
+        except Exception:  # noqa: BLE001 - recorder must not kill anything
+            return True
+        future = instance.async_get_commit_future()
+        if future is not None:
+            try:
+                await asyncio.wait_for(
+                    future, timeout=RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                _LOGGER.debug(
+                    "Last Changed Keeper: recorder commit still pending "
+                    "after %ds - querying anyway",
+                    RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS,
+                )
+        return not self.hass.is_stopping
+
     async def _async_run_impl(self, *, single_pass: bool = False) -> int:
         """Initial pass (with bulk query). Sets up listener + re-runs."""
         if single_pass and self._pending:
@@ -1115,6 +1180,17 @@ class _RestoreJob:
         pass-wide instrumentation — currently just "deep_queries", the count
         of entities that fell through to step 3 below. See _async_run_impl
         and async_verify, the two callers that report it in stats.
+
+        A bounded result (steps 1/3) is normally trusted unconditionally,
+        even when too recent to clear the margin — a genuine differing
+        value proves the value really did just change. A bound caused by a
+        removal (None-state) row is weaker evidence: it proves the entity
+        briefly didn't exist, not that its value changed, and re-
+        registration (Entity.async_remove() then a fresh state, e.g. a
+        config-entry reload) genuinely writes exactly such a row. A too-
+        recent removal bound is therefore treated as inconclusive rather
+        than a hard block, and falls through to the sources below instead
+        — see _real_last_changed's docstring for the full reasoning.
         """
         cutoff = live.last_changed
 
@@ -1125,12 +1201,20 @@ class _RestoreJob:
         # result around as a cheap best-effort fallback for step 4.
         bulk_ts: datetime | None = None
         if bulk_states is not None:
-            bulk_ts, bounded = _real_last_changed(bulk_states, live.state)
-            if bounded:
+            bulk_ts, bounded, bulk_removal_bound = _real_last_changed(
+                bulk_states, live.state
+            )
+            if bounded and not (bulk_removal_bound and not _ok(bulk_ts)):
                 # A bounded run start is definitive: the recorder proves the
                 # value genuinely changed at run_start. If that's not old
                 # enough to clear the margin, the value just changed for
                 # real — no other (older/staler) source may override it.
+                # Exception: a bound set by a removal (None-state) row only
+                # proves the entity briefly didn't exist, not that the
+                # value changed — a too-recent instance of that (this
+                # session's own re-registration) is excluded by the `not
+                # (...)` above and falls through to the sources below
+                # instead of being hard-blocked (see _real_last_changed).
                 if not _ok(bulk_ts):
                     return None
                 # The incrementally-updated runtime store (see
@@ -1157,16 +1241,18 @@ class _RestoreJob:
         # 3. Deep per-entity query
         if counters is not None:
             counters["deep_queries"] = counters.get("deep_queries", 0) + 1
-        try:
-            deep = await get_instance(self.hass).async_add_executor_job(
-                get_last_state_changes, self.hass, HISTORY_DEPTH, entity_id
-            )
-            deep_states = deep.get(entity_id, [])
-        except Exception as err:  # noqa: BLE001 - recorder must not kill anything
-            _LOGGER.debug("Recorder query for %s failed: %s", entity_id, err)
-            deep_states = []
-        ts2, bounded2 = _real_last_changed(deep_states, live.state)
-        if bounded2:
+        deep_states: list = []
+        if await self._wait_for_recorder_commit():
+            try:
+                deep = await get_instance(self.hass).async_add_executor_job(
+                    get_last_state_changes, self.hass, HISTORY_DEPTH, entity_id
+                )
+                deep_states = deep.get(entity_id, [])
+            except Exception as err:  # noqa: BLE001 - recorder must not kill anything
+                _LOGGER.debug("Recorder query for %s failed: %s", entity_id, err)
+                deep_states = []
+        ts2, bounded2, deep_removal_bound = _real_last_changed(deep_states, live.state)
+        if bounded2 and not (deep_removal_bound and not _ok(ts2)):
             return ts2 if _ok(ts2) else None
 
         # 4. Best effort from an unbounded run (deep query first, bulk as a
@@ -1282,10 +1368,12 @@ class _RestoreJob:
         batch_size = self._bulk_batch_size
         for i in range(0, len(entity_ids), batch_size):
             chunk = entity_ids[i : i + batch_size]
+            result: dict = {}
             try:
-                result = await get_instance(self.hass).async_add_executor_job(
-                    _bulk_query, self.hass, start, chunk
-                )
+                if await self._wait_for_recorder_commit():
+                    result = await get_instance(self.hass).async_add_executor_job(
+                        _bulk_query, self.hass, start, chunk
+                    )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "Bulk recorder query failed (batch %d, %d entities): %s",
@@ -1374,6 +1462,8 @@ class _RestoreJob:
 
     async def _resolve_last_triggered(self, entity_id: str) -> datetime | None:
         """Newest last_triggered attribute value recorded for entity_id."""
+        if not await self._wait_for_recorder_commit():
+            return None
         try:
             history = await get_instance(self.hass).async_add_executor_job(
                 get_last_state_changes, self.hass, HISTORY_DEPTH, entity_id
@@ -2085,16 +2175,33 @@ def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> 
 
 def _real_last_changed(
     history: Iterable, current_state: str
-) -> tuple[datetime | None, bool]:
+) -> tuple[datetime | None, bool, bool]:
     """Determine when the current real value run began.
 
     Walks the valid states from newest to oldest while the value equals
     current_state. The oldest entry of that contiguous run is the real time.
     Restart recoveries (only via unavailable in between) are skipped this way.
 
-    Returns: (timestamp | None, bounded). bounded=True means the run was bounded
-    by a different valid value → the timestamp is certain. With bounded=False the
+    Returns: (timestamp | None, bounded, bounded_by_removal).
+    bounded=True means the run was bounded by a different valid value (this
+    includes a None/removed state — see _bulk_query's docstring on why
+    those rows are kept) → the timestamp is certain. With bounded=False the
     history was exhausted → best effort only.
+
+    bounded_by_removal is only meaningful when bounded=True: it's True when
+    the bounding row specifically had state=None (the entity was removed,
+    e.g. Entity.async_remove() on a config-entry reload/device rejoin, or a
+    test simulating one) rather than a genuine differing VALUE. Unlike a
+    genuine differing value — which proves for certain the value just
+    changed, and must be trusted even when very recent (see _resolve step
+    1/3) — a removal boundary only proves the entity briefly didn't exist;
+    it says nothing about whether the value itself changed, so a *very
+    recent* instance of it (this session's own re-registration, not some
+    unrelated entity-id-reuse boundary from the past) must not be trusted
+    as if it were that same kind of proof. _resolve uses this to decide
+    whether a too-recent bound should still block other sources (a genuine
+    value bound) or is merely inconclusive and should not (a removal
+    bound) — see its docstring and the CLAUDE.md commit-lag paragraph.
     """
     valid = sorted(
         (
@@ -2108,12 +2215,14 @@ def _real_last_changed(
     )
     run_start: datetime | None = None
     bounded = False
+    bounded_by_removal = False
     for s in valid:
         if s.state != current_state:
             bounded = True
+            bounded_by_removal = s.state is None
             break
         run_start = s.last_changed
-    return run_start, bounded
+    return run_start, bounded, bounded_by_removal
 
 
 def _parse_delays(raw, default: tuple[int, ...]) -> tuple[int, ...]:

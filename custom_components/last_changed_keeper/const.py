@@ -40,6 +40,18 @@ DEFAULT_ALL_ENTITIES = True
 # wait would hang the boot pass forever instead.
 RECORDER_READY_TIMEOUT_SECONDS = 3600
 
+# Bound on how long a single history query waits for the recorder's own
+# write queue to flush (see _wait_for_recorder_commit) before querying
+# anyway. Kept short, unlike RECORDER_READY_TIMEOUT_SECONDS: this guards
+# a per-query race (ordinary commit lag, normally sub-second, a few
+# seconds under real load - see the alert2.back_door_open field evidence,
+# a 3-second gap) rather than a one-time boot gate, and this wait can be
+# hit many times in a single pass (once per bulk batch, once per deep
+# query) - a long per-call timeout would risk compounding into a much
+# longer pass under sustained load instead of just occasionally, briefly
+# querying with stale data.
+RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS = 10
+
 SERVICE_RESTORE_NOW = "restore_now"
 SERVICE_VERIFY = "verify"
 
