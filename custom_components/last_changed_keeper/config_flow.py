@@ -253,7 +253,12 @@ class LastChangedKeeperConfigFlow(ConfigFlow, domain=DOMAIN):
                 # last. Without this, a single earlier options-flow save
                 # permanently shadows every future reconfigure — the save
                 # looks successful but has zero effect.
-                return self.async_update_reload_and_abort(
+                #
+                # async_update_and_abort (not _reload_and_abort): the entry
+                # already has an update listener that reloads on change, so
+                # also scheduling a reload here would reload it twice /
+                # race (deprecated since HA 2026.6, an error from 2026.12).
+                return self.async_update_and_abort(
                     entry, data=user_input, options={}
                 )
             defaults = user_input
