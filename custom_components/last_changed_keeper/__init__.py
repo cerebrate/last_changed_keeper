@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -128,6 +129,7 @@ from .const import (
     PENDING_RECOVERY_DEBOUNCE_SECONDS,
     PENDING_RECOVERY_MAX_WAIT_SECONDS,
     PURGE_BOUNDARY_MARGIN_DAYS,
+    RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS,
     RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS,
     RECORDER_READY_TIMEOUT_SECONDS,
     REREGISTER_DEBOUNCE_SECONDS,
@@ -390,6 +392,12 @@ class _RestoreJob:
         # alone isn't enough.
         self._known_targets: set[str] = set()
         self._unsub_target_discovery_timer: CALLBACK_TYPE | None = None
+
+        # ----- Feature: recorder commit-wait coalescing --------------------
+        # monotonic timestamp of the last time _wait_for_recorder_commit
+        # actually checked the recorder (rather than short-circuiting on
+        # the cooldown below) — see RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS.
+        self._last_commit_sync_monotonic: float = 0.0
 
     # ----- Configuration -------------------------------------------------
 
@@ -713,9 +721,33 @@ class _RestoreJob:
         brief in-flight query to finish or be interrupted cleanly in that
         window; a query we could have avoided starting in the first place
         by checking here shouldn't be made to rely on that.
+
+        Coalesced to at most one genuine check per
+        RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS. A non-empty write queue
+        makes async_get_commit_future() enqueue a SynchronizeTask, and
+        every RecorderTask defaults to commit_before=True — so a "free
+        when idle" check is not free at all on a busy install, it forces
+        an early commit. This integration issues its recorder queries
+        sequentially (one per bulk batch, one per still-unresolved
+        entity's deep/last_triggered query) in a plain loop with no
+        pacing of its own, so calling this unconditionally before every
+        one of them turns the recorder's normal, efficient batched commit
+        behaviour into a forced commit per query. Field-observed on a
+        large install: the recorder fell far enough behind under this
+        self-reinforcing load (each stalled forced commit adding more
+        load in turn) that RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS itself was
+        repeatedly hit, and real sensor history stopped being recorded for
+        hours — worse than the commit-lag bug this method exists to fix.
+        The cooldown caps forced-commit frequency independent of query
+        volume while still catching commit lag on the same timescale as
+        the original field evidence (a 3-second-old transition).
         """
         if self.hass.is_stopping:
             return False
+        now = time.monotonic()
+        elapsed = now - self._last_commit_sync_monotonic
+        if elapsed < RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS:
+            return True
         try:
             instance = get_instance(self.hass)
         except Exception:  # noqa: BLE001 - recorder must not kill anything
@@ -732,6 +764,7 @@ class _RestoreJob:
                     "after %ds - querying anyway",
                     RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS,
                 )
+        self._last_commit_sync_monotonic = time.monotonic()
         return not self.hass.is_stopping
 
     async def _async_run_impl(self, *, single_pass: bool = False) -> int:
