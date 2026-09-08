@@ -97,9 +97,32 @@ the readiness wait above, since this can be hit many times within a single
 pass (once per batch, once per deep query) and a long per-call timeout
 would risk compounding into a much longer pass under sustained load,
 whereas this guards an ordinary sub-second-to-few-second race, not a
-one-time migration. It costs nothing in the common case: the write queue
-is usually already empty, and `async_get_commit_future()` returns `None`
-immediately when so.
+one-time migration. It's cheap only when the write queue happens to
+already be empty (`async_get_commit_future()` returns `None` immediately);
+when it isn't, `async_get_commit_future()` enqueues a `SynchronizeTask`,
+and every `RecorderTask` defaults to `commit_before=True` — so a non-empty
+queue makes this force an *early* commit rather than waiting for the
+recorder's own efficient, ~5s-batched commit interval. Calling it
+unconditionally before every one of this integration's sequential,
+unpaced per-query calls (one per bulk batch, one per still-unresolved
+entity's deep/`last_triggered` query — hundreds to thousands on a large
+"track all entities" install, and re-run by the periodic sweep every
+`NEW_TARGET_SCAN_INTERVAL_SECONDS`) turns that batched commit behaviour
+into a forced commit per query instead. Field-observed on a busy
+install: this created a self-reinforcing feedback loop (each stalled
+forced commit adding more load to an already-overloaded recorder) severe
+enough that `RECORDER_COMMIT_WAIT_TIMEOUT_SECONDS` itself was repeatedly
+hit, and real sensor history simply stopped being recorded for hours —
+worse than the commit-lag bug this method exists to fix, and only visible
+by disabling the integration entirely (no related log messages beyond the
+now-frequent "commit still pending after 10s" DEBUG line). Fixed by
+coalescing: `_wait_for_recorder_commit()` only genuinely checks the
+recorder at most once per `RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS`
+(tracked via `self._last_commit_sync_monotonic`); a call within that
+window returns immediately without touching the recorder at all. This
+caps forced-commit frequency independent of how many queries a given pass
+issues, while still catching commit lag on the same timescale as the
+original field evidence (a 3-second-old transition).
 
 **Core flow (`_RestoreJob._async_run_impl`, boot pass):**
 1. Resolve targets via `resolve_targets()` (domains/entities/labels/areas minus

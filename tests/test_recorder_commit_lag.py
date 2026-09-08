@@ -80,6 +80,58 @@ async def test_wait_for_recorder_commit_proceeds_after_timeout(
     never_resolved.cancel()
 
 
+async def test_wait_for_recorder_commit_coalesces_rapid_calls(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Two calls in quick succession must only genuinely check the recorder
+    once - see RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS. Without this, a
+    sequential loop of many per-entity queries (a large install's boot
+    pass, or a periodic sweep over many unconfirmed entities) forces one
+    early recorder commit per query instead of the recorder's own
+    efficient batched commit behaviour - field-observed to stall real
+    writes for hours on a busy install."""
+    job = _make_job(hass)
+    instance = lck.get_instance(hass)
+    calls = {"n": 0}
+
+    def _counting_get_commit_future():
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(
+        instance, "async_get_commit_future", _counting_get_commit_future
+    )
+
+    await asyncio.wait_for(job._wait_for_recorder_commit(), timeout=2)
+    await asyncio.wait_for(job._wait_for_recorder_commit(), timeout=2)
+
+    assert calls["n"] == 1
+
+
+async def test_wait_for_recorder_commit_rechecks_after_cooldown(
+    recorder_mock, hass: HomeAssistant, monkeypatch
+) -> None:
+    """Once the coalescing cooldown has elapsed, the helper must genuinely
+    check the recorder again rather than skipping forever."""
+    monkeypatch.setattr(lck, "RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS", 0)
+    job = _make_job(hass)
+    instance = lck.get_instance(hass)
+    calls = {"n": 0}
+
+    def _counting_get_commit_future():
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(
+        instance, "async_get_commit_future", _counting_get_commit_future
+    )
+
+    await asyncio.wait_for(job._wait_for_recorder_commit(), timeout=2)
+    await asyncio.wait_for(job._wait_for_recorder_commit(), timeout=2)
+
+    assert calls["n"] == 2
+
+
 async def test_boot_pass_calls_wait_for_recorder_commit(
     recorder_mock, hass: HomeAssistant, monkeypatch
 ) -> None:
