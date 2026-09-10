@@ -109,6 +109,11 @@
       "status": {
         "name": "Wiederhergestellte Entities"
       }
+    },
+    "button": {
+      "restore_now": {
+        "name": "Jetzt wiederherstellen"
+      }
     }
   }
 }
