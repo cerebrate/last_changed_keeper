@@ -2,6 +2,12 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.11] — 2026-09-12
+### Added
+- **`button.restore_now`.** Lets users trigger a restore pass from the
+  entity/device page for debugging, without an action call or building a
+  dashboard button.
+
 ## [0.9.10] — 2026-09-03
 ### Fixed
 - **Reconfigure no longer reloads the entry twice.** The reconfigure step
