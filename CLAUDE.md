@@ -168,21 +168,34 @@ original field evidence (a 3-second-old transition).
    "bounded" run (recorder history shows an older, different value) is
    definitive; an "unbounded" one (history exhausted) is only trusted under
    specific conditions — see the docstrings on `_resolve` and `_real_last_changed`.
-   `_real_last_changed` also reports *why* a run is bounded: a genuine
-   differing value proves the value really did just change and is trusted
-   unconditionally even when too recent to clear `MARGIN_SECONDS` (no other
-   source may override it); a `None`-state (entity removal) row — written
-   on every `Entity.async_remove()`, i.e. every config-entry reload/device
-   rejoin, exactly the case the re-registration listener exists to fix —
-   only proves the entity briefly didn't exist, not that its value
-   changed, so a boundary that's *both* removal-caused *and* too recent
-   (this session's own re-registration, not some older entity-id-reuse
-   boundary) is inconclusive rather than a hard block, and `_resolve` falls
-   through to the snapshot/deep/best-effort sources below instead. Without
-   this distinction a fast reload would leave the entity permanently
-   `_unconfirmed` — the bulk history behind the block never changes, so
-   every later retry recomputes the identical wrong answer — worse off
-   than never fixing the query race in the first place.
+   A genuine differing value proves the value really did just change and
+   is trusted unconditionally even when too recent to clear
+   `MARGIN_SECONDS` (no other source may override it). A `None`-state
+   (entity removal) row — written on every `Entity.async_remove()`, i.e.
+   every graceful entity teardown, which includes an ordinary graceful HA
+   restart as well as a config-entry reload/device rejoin — only proves
+   the entity briefly didn't exist, not that its value changed, so
+   `_real_last_changed` treats it exactly like `unavailable`/`unknown`:
+   transparent to the walk, neither extending a run nor bounding one,
+   however old it is. An earlier attempt at this (0.9.10's
+   `bounded_by_removal`) tried to distinguish "too recent to trust" from
+   "old enough to trust" instead, comparing the removal row's age against
+   the entity's own current `live.last_changed` — but that reference point
+   is itself whatever the last resolve wrote, so it only ever protected
+   the single most-recently-written removal row. An entity that survives
+   several restarts without a genuine value change accumulates one
+   removal row per restart, and every one of them older than the latest
+   got trusted as if it were a real transition — field-diagnosed via a
+   cluster of entities `_apply()`'d and `_confirmed` against a stale
+   intermediate restart's own artifact instead of their true origin, then
+   never revisited again (same `_confirmed`-means-never-revisited dead end
+   as everywhere else in this file). Treating every removal row as
+   transparent regardless of age closes that gap outright — there's no
+   heuristic left to get wrong — at the cost of no longer hard-blocking on
+   an entity_id being reused for a genuinely different underlying device;
+   that trade only matters for a use pattern (deliberate entity_id reuse
+   across unrelated devices) this integration doesn't need to protect
+   against.
    One of those conditions is `_near_purge_boundary`: every HA restart writes
    a fresh recorder row for each entity even when its value hasn't changed
    (the live in-place `last_changed` patch never gets written back to the
