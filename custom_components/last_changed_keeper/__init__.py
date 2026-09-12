@@ -1214,16 +1214,12 @@ class _RestoreJob:
         of entities that fell through to step 3 below. See _async_run_impl
         and async_verify, the two callers that report it in stats.
 
-        A bounded result (steps 1/3) is normally trusted unconditionally,
-        even when too recent to clear the margin — a genuine differing
-        value proves the value really did just change. A bound caused by a
-        removal (None-state) row is weaker evidence: it proves the entity
-        briefly didn't exist, not that its value changed, and re-
-        registration (Entity.async_remove() then a fresh state, e.g. a
-        config-entry reload) genuinely writes exactly such a row. A too-
-        recent removal bound is therefore treated as inconclusive rather
-        than a hard block, and falls through to the sources below instead
-        — see _real_last_changed's docstring for the full reasoning.
+        A bounded result (steps 1/3) is trusted unconditionally, even when
+        too recent to clear the margin — a genuine differing value proves
+        the value really did just change, and no older/staler source may
+        override it. A removal (None-state) row can never produce a
+        bounded result in the first place — see _real_last_changed's
+        docstring — so there is nothing further to guard against here.
         """
         cutoff = live.last_changed
 
@@ -1234,20 +1230,12 @@ class _RestoreJob:
         # result around as a cheap best-effort fallback for step 4.
         bulk_ts: datetime | None = None
         if bulk_states is not None:
-            bulk_ts, bounded, bulk_removal_bound = _real_last_changed(
-                bulk_states, live.state
-            )
-            if bounded and not (bulk_removal_bound and not _ok(bulk_ts)):
+            bulk_ts, bounded = _real_last_changed(bulk_states, live.state)
+            if bounded:
                 # A bounded run start is definitive: the recorder proves the
                 # value genuinely changed at run_start. If that's not old
                 # enough to clear the margin, the value just changed for
                 # real — no other (older/staler) source may override it.
-                # Exception: a bound set by a removal (None-state) row only
-                # proves the entity briefly didn't exist, not that the
-                # value changed — a too-recent instance of that (this
-                # session's own re-registration) is excluded by the `not
-                # (...)` above and falls through to the sources below
-                # instead of being hard-blocked (see _real_last_changed).
                 if not _ok(bulk_ts):
                     return None
                 # The incrementally-updated runtime store (see
@@ -1284,8 +1272,8 @@ class _RestoreJob:
             except Exception as err:  # noqa: BLE001 - recorder must not kill anything
                 _LOGGER.debug("Recorder query for %s failed: %s", entity_id, err)
                 deep_states = []
-        ts2, bounded2, deep_removal_bound = _real_last_changed(deep_states, live.state)
-        if bounded2 and not (deep_removal_bound and not _ok(ts2)):
+        ts2, bounded2 = _real_last_changed(deep_states, live.state)
+        if bounded2:
             return ts2 if _ok(ts2) else None
 
         # 4. Best effort from an unbounded run (deep query first, bulk as a
@@ -2138,7 +2126,13 @@ def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> 
     availability a few dozen times a day would otherwise push the run's
     bounding row out of the capped result and silently defeat restoration
     for exactly the flaky-connectivity devices most likely to need it.
-    NULL-state rows (entity removal) are kept: they genuinely bound runs.
+    NULL-state rows (entity removal, written on every graceful entity
+    teardown — an ordinary restart or config-entry reload, not just a rare
+    device swap) are dropped the same way and for the same reason: a
+    removal row can never bound a run (see _real_last_changed), so with a
+    per-entity cap it would only crowd out rows that could actually reach
+    a genuine value change — worse the more restarts an install has been
+    through recently.
     Window functions need SQLite >= 3.25 / MariaDB >= 10.2 / MySQL 8 / any
     PostgreSQL — all far below Home Assistant's own database minimums.
     """
@@ -2171,12 +2165,15 @@ def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> 
                 States.last_changed_ts.is_(None),
                 States.last_changed_ts == States.last_updated_ts,
             ),
-            # NOT IN would drop NULL-state rows too (NULL NOT IN (...) is
-            # NULL, not TRUE) — keep them explicitly, they bound runs.
-            or_(
-                States.state.is_(None),
-                States.state.not_in(INVALID_STATES),
-            ),
+            # A NULL state (entity removal) is dropped here too, the same
+            # as unavailable/unknown: _real_last_changed no longer lets a
+            # removal row bound a run (it only proves the entity briefly
+            # didn't exist, not that its value changed — see that
+            # function's docstring), so keeping it would only waste a cap
+            # slot. NULL NOT IN (...) already evaluates to NULL, not TRUE,
+            # so plain not_in() excludes it for free without an explicit
+            # is_(None) check.
+            States.state.not_in(INVALID_STATES),
         )
         .subquery()
     )
@@ -2208,39 +2205,41 @@ def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> 
 
 def _real_last_changed(
     history: Iterable, current_state: str
-) -> tuple[datetime | None, bool, bool]:
+) -> tuple[datetime | None, bool]:
     """Determine when the current real value run began.
 
     Walks the valid states from newest to oldest while the value equals
     current_state. The oldest entry of that contiguous run is the real time.
-    Restart recoveries (only via unavailable in between) are skipped this way.
+    Restart recoveries (only via unavailable in between) are skipped this
+    way, and so is a removal (state=None) row — written by
+    Entity.async_remove() on every graceful entity teardown, which includes
+    an ordinary graceful HA restart and a config-entry reload, not just the
+    rare case of an entity_id being deliberately reused for a genuinely
+    different device. A removal row only proves the entity briefly didn't
+    exist; it says nothing about whether its value changed, so — like
+    unavailable/unknown — it neither extends the run nor bounds it, no
+    matter how old it is: an entity that has survived several restarts
+    without a genuine value change accumulates one removal row per
+    restart, and treating any of them (beyond the very latest) as a real
+    boundary is exactly how an entity ends up confidently, permanently
+    patched to an intermediate restart's own artifact instead of its true
+    origin — field-diagnosed via a cluster of entities stuck at a stale
+    restart timestamp for days, never revisited again since a "bounded"
+    resolve gets _apply()'d and the entity marked _confirmed. See
+    _bulk_query's docstring: since a removal row can no longer bound
+    anything, that query no longer bothers fetching it either.
 
-    Returns: (timestamp | None, bounded, bounded_by_removal).
-    bounded=True means the run was bounded by a different valid value (this
-    includes a None/removed state — see _bulk_query's docstring on why
-    those rows are kept) → the timestamp is certain. With bounded=False the
-    history was exhausted → best effort only.
-
-    bounded_by_removal is only meaningful when bounded=True: it's True when
-    the bounding row specifically had state=None (the entity was removed,
-    e.g. Entity.async_remove() on a config-entry reload/device rejoin, or a
-    test simulating one) rather than a genuine differing VALUE. Unlike a
-    genuine differing value — which proves for certain the value just
-    changed, and must be trusted even when very recent (see _resolve step
-    1/3) — a removal boundary only proves the entity briefly didn't exist;
-    it says nothing about whether the value itself changed, so a *very
-    recent* instance of it (this session's own re-registration, not some
-    unrelated entity-id-reuse boundary from the past) must not be trusted
-    as if it were that same kind of proof. _resolve uses this to decide
-    whether a too-recent bound should still block other sources (a genuine
-    value bound) or is merely inconclusive and should not (a removal
-    bound) — see its docstring and the CLAUDE.md commit-lag paragraph.
+    Returns: (timestamp | None, bounded). bounded=True means the run was
+    bounded by a row with a genuinely different value → the timestamp is
+    certain. With bounded=False the history was exhausted (or only
+    contained removal/invalid rows) → best effort only.
     """
     valid = sorted(
         (
             s
             for s in history
             if getattr(s, "state", None) not in INVALID_STATES
+            and getattr(s, "state", None) is not None
             and getattr(s, "last_changed", None) is not None
         ),
         key=lambda s: s.last_updated,
@@ -2248,14 +2247,12 @@ def _real_last_changed(
     )
     run_start: datetime | None = None
     bounded = False
-    bounded_by_removal = False
     for s in valid:
         if s.state != current_state:
             bounded = True
-            bounded_by_removal = s.state is None
             break
         run_start = s.last_changed
-    return run_start, bounded, bounded_by_removal
+    return run_start, bounded
 
 
 def _parse_delays(raw, default: tuple[int, ...]) -> tuple[int, ...]:

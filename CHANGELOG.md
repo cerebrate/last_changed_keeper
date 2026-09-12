@@ -2,6 +2,49 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.13] — 2026-09-12
+### Fixed
+- **An entity that survived several restarts without a genuine value
+  change could get permanently, confidently patched to an intermediate
+  restart's own artifact instead of its true origin.** `Entity.
+  async_remove()` writes a `None`-state row to the recorder on every
+  graceful entity teardown — an ordinary graceful HA restart as well as a
+  config-entry reload — and `_real_last_changed` let such a row bound a
+  run just like a genuine differing value. 0.9.10's `bounded_by_removal`
+  tried to avoid trusting a *too-recent* instance of this, but measured
+  "too recent" against the entity's own current `live.last_changed` —
+  which is itself whatever the last resolve wrote, so the guard only ever
+  protected the single most-recently-written removal row. Any older one
+  an entity accumulated over multiple restarts got trusted as if it were
+  a real transition, `_apply()`'d, and the entity marked `_confirmed` —
+  after which, per this integration's own `_confirmed`-means-never-
+  revisited design, nothing ever re-checked it again.
+
+  Field-diagnosed on the same installation: a cluster of 42 entities
+  spanning many unrelated integrations (Echo devices, UniFi switches,
+  `magic_areas` aggregates, device trackers) were all patched to a stale
+  restart timestamp from days earlier during one boot pass, and never
+  touched again — a fresh `verify` call hours later independently
+  recomputed the true, still-earlier origin for the same entities. The
+  same shape recurred from an even earlier restart for a different pair
+  of entities, confirming it as a general, recurring bug rather than a
+  one-off.
+
+  Fixed by treating a removal row exactly like `unavailable`/`unknown`:
+  transparent to `_real_last_changed`'s walk, regardless of age — it
+  neither extends a run nor bounds one, so the walk simply continues past
+  it looking for a row where the value genuinely differs. This removes
+  `bounded_by_removal` and its age heuristic entirely rather than
+  patching it further; the one thing that heuristic partly preserved —
+  not trusting history from before an entity_id was reused for a
+  genuinely different device — isn't a scenario this integration needs to
+  guard against. `_bulk_query` also stops fetching removal rows in the
+  first place, since they can no longer bound anything: on an install
+  that's been through several restarts recently, every one of those rows
+  was previously wasting a slot in the per-entity row cap
+  (`BULK_PER_ENTITY_LIMIT`) that could otherwise have reached a genuine
+  value change further back.
+
 ## [0.9.12] — 2026-09-08
 ### Fixed
 - **0.9.11's recorder-commit-lag protection could itself stall real
