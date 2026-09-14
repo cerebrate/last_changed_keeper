@@ -2,6 +2,48 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.14] — 2026-09-14
+### Fixed
+- **An entity torn down and recreated with an unchanged value, repeatedly,
+  could get a different "true" `last_changed` answer depending on when
+  you asked — sometimes falling back to no answer at all.** The bulk
+  query's per-entity row cap (`BULK_PER_ENTITY_LIMIT`) counted every row
+  that passed its "genuine value change" filter, including a same-value
+  recreation row written right after a removal (v0.9.13 stopped the
+  removal row itself from being trusted as a boundary, but the
+  recreation row immediately following it still consumed a cap slot).
+  `_real_last_changed`'s walk already handled a same-value row correctly
+  — it just extends the run backward — so this was never a walk-logic
+  bug; it was purely that the cap could be spent entirely on
+  non-informative rows before the walk ever saw them.
+
+  Field-diagnosed on the same installation: `binary_sensor.echo_dot_bedroom`
+  and dozens of entities across unrelated integrations (Echo devices,
+  UniFi trackers, `magic_areas` aggregates) get torn down and recreated
+  in mass bursts every few hours, driven by Alexa Devices' and UniFi
+  Network's own documented reliability issues (session refresh failures,
+  websocket disconnects) cascading through `magic_areas`'s area
+  aggregation. `_resolve()` computed two different answers for the same,
+  apparently-unchanged entity at two points in a single 38-hour session
+  with no restart in between — an inconsistency that can only get worse
+  the longer an install goes without a restart, since every reload cycle
+  eats another cap slot.
+
+  Fixed by deduplicating consecutive same-value rows in `_bulk_query`
+  before applying the cap (a `LAG()`-based "only count genuine
+  transitions" pass, ahead of the existing `row_number()` ranking) —
+  the cap now always represents up to `BULK_PER_ENTITY_LIMIT` genuine
+  transitions, regardless of how many teardown/recreate cycles happened
+  in between. This is deliberately general-purpose: it isn't specific to
+  Alexa Devices or UniFi Network, and helps against any integration's
+  reload behavior having the same effect. The equivalent gap in the
+  deep-query fallback path (`_resolve()` step 3, via HA core's own
+  `get_last_state_changes` — which applies no filtering at all before
+  its own cap, not even for attribute-only or unavailable rows) is not
+  addressed here: fixing it would mean replacing that call with a custom
+  query, which is a larger undertaking than this release scopes to, and
+  there's no field evidence yet that path has caused a wrong answer.
+
 ## [0.9.13] — 2026-09-12
 ### Fixed
 - **An entity that survived several restarts without a genuine value
