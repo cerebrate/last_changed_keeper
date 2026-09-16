@@ -96,7 +96,7 @@ async def test_attribute_only_rows_excluded_for_significant_domain(
 
     # 2 genuine changes (not_home, home) - not 32 rows.
     assert len(rows) == 2
-    ts, bounded = lck._real_last_changed(rows, "home")
+    ts, bounded, _ = lck._real_last_changed(rows, "home")
     assert bounded
     assert abs((ts - went_home_at).total_seconds()) < 1
 
@@ -174,7 +174,7 @@ async def test_bounded_result_at_exact_cap_length_stays_trusted(
     # window shifts by one — what matters is that the result IS full-length
     # and still bounds.
     assert len(rows) == BULK_PER_ENTITY_LIMIT
-    _ts, bounded = lck._real_last_changed(rows, final_value)
+    _ts, bounded, _ = lck._real_last_changed(rows, final_value)
     assert bounded
 
     result = await job._resolve("light.busy", live, rows)
@@ -208,7 +208,7 @@ async def test_cap_is_per_entity_not_per_batch(
     ):
         assert len(bulk["sensor.loud"]) == BULK_PER_ENTITY_LIMIT
         assert len(bulk["switch.quiet"]) == 2
-        ts, bounded = lck._real_last_changed(bulk["switch.quiet"], "on")
+        ts, bounded, _ = lck._real_last_changed(bulk["switch.quiet"], "on")
         assert bounded
         assert abs((ts - quiet_changed_at).total_seconds()) < 1
 
@@ -242,7 +242,7 @@ async def test_availability_flaps_do_not_consume_cap(
 
     assert len(rows) < BULK_PER_ENTITY_LIMIT
     assert not any(r.state in ("unavailable", "unknown") for r in rows)
-    ts, bounded = lck._real_last_changed(rows, "on")
+    ts, bounded, _ = lck._real_last_changed(rows, "on")
     assert bounded
     assert abs((ts - changed_at).total_seconds()) < 1
 
