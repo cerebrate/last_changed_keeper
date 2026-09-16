@@ -2102,7 +2102,7 @@ class _BulkRow:
 
 def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> dict:
     """In the recorder executor: per entity, the newest BULK_PER_ENTITY_LIMIT
-    genuine value-change rows within the bulk window.
+    genuine value TRANSITIONS within the bulk window.
 
     Replaces get_significant_states, which is unbounded per entity in two
     ways that OOM large installations (verified empirically on a real
@@ -2113,49 +2113,65 @@ def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> 
     humidifier, thermostat, water_heater) return even attribute-only rows.
     Neither can be capped through that API — it has no per-entity LIMIT.
 
-    This query keeps only genuine value changes for EVERY domain
-    (last_changed_ts is NULL when the value changed at that row, i.e. equals
-    last_updated; on attribute-only rows it is set and older) and caps rows
-    per entity with a window function, so a batch is bounded by
-    BULK_BATCH_SIZE x BULK_PER_ENTITY_LIMIT small rows. Dropping
-    attribute-only rows never changes the resolve walk's outcome: such a row
-    always carries the same value as its neighbours, so it can neither bound
-    a run nor move its start. unavailable/unknown rows are likewise dropped
-    at the SQL layer: _real_last_changed discards them unread anyway, but
-    with a per-entity cap they must not eat cap slots — a device flapping
-    availability a few dozen times a day would otherwise push the run's
-    bounding row out of the capped result and silently defeat restoration
-    for exactly the flaky-connectivity devices most likely to need it.
-    NULL-state rows (entity removal, written on every graceful entity
-    teardown — an ordinary restart or config-entry reload, not just a rare
-    device swap) are dropped the same way and for the same reason: a
-    removal row can never bound a run (see _real_last_changed), so with a
-    per-entity cap it would only crowd out rows that could actually reach
-    a genuine value change — worse the more restarts an install has been
-    through recently.
+    Three layers:
+
+    1. candidates: genuine value-change rows for EVERY domain
+       (last_changed_ts is NULL when the value changed at that row, i.e.
+       equals last_updated; on attribute-only rows it is set and older),
+       excluding unavailable/unknown/None (removal) states, plus a LAG
+       window function exposing each row's chronologically-preceding
+       candidate's state.
+    2. transitions: keeps only rows from (1) whose value actually differs
+       from their predecessor's (or have no predecessor within the
+       window) - i.e. deduplicates consecutive same-value rows - then
+       ranks the SURVIVORS newest-first with row_number().
+    3. the final SELECT, capping on that rank so a batch is bounded by
+       BULK_BATCH_SIZE x BULK_PER_ENTITY_LIMIT small rows.
+
+    Dropping attribute-only, unavailable/unknown, and None (removal) rows
+    never changes the resolve walk's outcome (_real_last_changed already
+    treats all three as transparent - see its docstring) - it only avoids
+    wasting cap slots on rows that could never bound a run or move its
+    start. The same logic extends to same-value rows in general via the
+    transitions layer: a device flapping availability, or an entity torn
+    down and recreated with an unchanged value (an ordinary restart, a
+    config-entry reload, or - field-diagnosed - a cascade from an
+    unrelated integration's own instability repeatedly reloading entities
+    it doesn't even own) all produce a row that is indistinguishable from
+    a genuine transition at the SQL layer without this dedup step. Left
+    uncapped-on-transitions, an install where this happens every few
+    hours indefinitely can have an affected entity's cap slots
+    continuously consumed by these non-transitions, silently shrinking
+    how far back a query can actually see and making the computed answer
+    drift between calls instead of settling on the true, stable origin.
+    Deduplicating before ranking means the cap always represents up to
+    BULK_PER_ENTITY_LIMIT genuine transitions, regardless of how much
+    teardown/recreate noise happened in between.
     Window functions need SQLite >= 3.25 / MariaDB >= 10.2 / MySQL 8 / any
-    PostgreSQL — all far below Home Assistant's own database minimums.
+    PostgreSQL — all far below Home Assistant's own database minimums;
+    LAG was introduced in the same SQL:2003 batch as row_number, so this
+    adds no new floor.
     """
     if States is None or StatesMeta is None:
         # Import-time fallback (see the guarded db_schema import): raising
         # here lands in _iter_bulk_batches' per-batch catch, which yields an
         # empty result so every entity resolves via snapshot/deep instead.
         raise RuntimeError("recorder db_schema models unavailable")
-    rn = (
-        func.row_number()
+    prev_state = (
+        func.lag(States.state)
         .over(
             partition_by=States.metadata_id,
-            order_by=States.last_updated_ts.desc(),
+            order_by=States.last_updated_ts.asc(),
         )
-        .label("rn")
+        .label("prev_state")
     )
-    inner = (
+    candidates = (
         select(
             StatesMeta.entity_id,
             States.state,
             States.last_updated_ts,
             States.last_changed_ts,
-            rn,
+            prev_state,
         )
         .join(StatesMeta, States.metadata_id == StatesMeta.metadata_id)
         .where(
@@ -2177,12 +2193,36 @@ def _bulk_query(hass: HomeAssistant, start: datetime, entity_ids: list[str]) -> 
         )
         .subquery()
     )
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=candidates.c.entity_id,
+            order_by=candidates.c.last_updated_ts.desc(),
+        )
+        .label("rn")
+    )
+    transitions = (
+        select(
+            candidates.c.entity_id,
+            candidates.c.state,
+            candidates.c.last_updated_ts,
+            candidates.c.last_changed_ts,
+            rn,
+        )
+        .where(
+            or_(
+                candidates.c.prev_state.is_(None),
+                candidates.c.state != candidates.c.prev_state,
+            )
+        )
+        .subquery()
+    )
     stmt = select(
-        inner.c.entity_id,
-        inner.c.state,
-        inner.c.last_updated_ts,
-        inner.c.last_changed_ts,
-    ).where(inner.c.rn <= BULK_PER_ENTITY_LIMIT)
+        transitions.c.entity_id,
+        transitions.c.state,
+        transitions.c.last_updated_ts,
+        transitions.c.last_changed_ts,
+    ).where(transitions.c.rn <= BULK_PER_ENTITY_LIMIT)
 
     result: dict[str, list[_BulkRow]] = {}
     with session_scope(hass=hass, read_only=True) as session:
