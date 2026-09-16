@@ -21,6 +21,44 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   a config-flow reloading method has been deprecated since HA Core 2026.6
   and turns into a hard error from 2026.12 onward.
 
+## [0.9.13] — 2026-09-08
+### Fixed
+- **0.9.12's recorder-commit-lag protection could itself stall real
+  sensor history for hours on a busy install.** `_wait_for_recorder_commit()`
+  (added in 0.9.12) is called before every recorder history query this
+  integration issues — one per bulk batch, one per still-unresolved
+  entity's deep/`last_triggered` query — in a plain sequential loop with no
+  pacing of its own. `Recorder.async_get_commit_future()` is only free when
+  the write queue happens to already be empty; on a non-empty queue it
+  enqueues a `SynchronizeTask`, and every `RecorderTask` defaults to
+  `commit_before=True`, so it forces an *early* commit rather than letting
+  the recorder batch writes over its own ~5-second commit interval. Calling
+  this unconditionally before every one of potentially hundreds to
+  thousands of sequential queries (worse on a "track all entities" install,
+  and repeated by the periodic sweep every 5 minutes for anything still
+  `_unconfirmed`) turned that efficient batched commit behaviour into one
+  forced commit per query.
+
+  Field-reported after upgrading: long blanks (same value, no updates, for
+  several hours) in sensor value graphs, no related log messages, and the
+  problem stopped when the integration was disabled. The install's log
+  showed the "recorder commit still pending after 10s" DEBUG line
+  repeatedly — the wait wasn't just adding overhead, it was a
+  self-reinforcing feedback loop: each stalled forced-commit attempt added
+  more load to an already-overloaded recorder, making the next one more
+  likely to stall too, at wall-clock scale enough to stop real sensor
+  history from being recorded at all.
+
+  Fixed by coalescing: `_wait_for_recorder_commit()` now only genuinely
+  checks the recorder at most once per
+  `RECORDER_COMMIT_SYNC_MIN_INTERVAL_SECONDS` (new constant, default 2s,
+  tracked via `self._last_commit_sync_monotonic`) — a call within that
+  window returns immediately without touching the recorder at all. This
+  caps how often this integration can force an early commit, independent
+  of how many queries a given pass issues, while still catching commit lag
+  on the same timescale as 0.9.12's original field evidence (a
+  3-second-old transition).
+
 ## [0.9.12] — 2026-09-03
 ### Fixed
 - **A recorder history query could miss a state change that had already
