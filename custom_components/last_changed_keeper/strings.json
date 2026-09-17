@@ -109,6 +109,11 @@
       "status": {
         "name": "Restored entities"
       }
+    },
+    "button": {
+      "restore_now": {
+        "name": "Restore now"
+      }
     }
   }
 }

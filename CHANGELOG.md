@@ -2,14 +2,33 @@
 
 All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.9.14] — 2026-09-14
+## [0.9.11] — 2026-09-12
+### Added
+- **`button.restore_now`.** Lets users trigger a restore pass from the
+  entity/device page for debugging, without an action call or building a
+  dashboard button.
+
+## [0.9.10] — 2026-09-03
+### Fixed
+- **Reconfigure no longer reloads the entry twice.** The reconfigure step
+  called `async_update_reload_and_abort()`, which schedules its own reload
+  on top of the config-entry update listener already registered in
+  `async_setup_entry` — the listener reloads on *any* data/options change,
+  so every reconfigure save reloaded the integration twice back-to-back
+  (and, per Home Assistant's own docs, could race). Switched to
+  `async_update_and_abort()`, which updates the entry and lets the existing
+  listener drive the single reload. Combining a config-entry listener with
+  a config-flow reloading method has been deprecated since HA Core 2026.6
+  and turns into a hard error from 2026.12 onward.
+
+## [0.9.15] — 2026-09-14
 ### Fixed
 - **An entity torn down and recreated with an unchanged value, repeatedly,
   could get a different "true" `last_changed` answer depending on when
   you asked — sometimes falling back to no answer at all.** The bulk
   query's per-entity row cap (`BULK_PER_ENTITY_LIMIT`) counted every row
   that passed its "genuine value change" filter, including a same-value
-  recreation row written right after a removal (v0.9.13 stopped the
+  recreation row written right after a removal (v0.9.14 stopped the
   removal row itself from being trusted as a boundary, but the
   recreation row immediately following it still consumed a cap slot).
   `_real_last_changed`'s walk already handled a same-value row correctly
@@ -44,7 +63,7 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   query, which is a larger undertaking than this release scopes to, and
   there's no field evidence yet that path has caused a wrong answer.
 
-## [0.9.13] — 2026-09-12
+## [0.9.14] — 2026-09-12
 ### Fixed
 - **An entity that survived several restarts without a genuine value
   change could get permanently, confidently patched to an intermediate
@@ -52,7 +71,7 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   async_remove()` writes a `None`-state row to the recorder on every
   graceful entity teardown — an ordinary graceful HA restart as well as a
   config-entry reload — and `_real_last_changed` let such a row bound a
-  run just like a genuine differing value. 0.9.10's `bounded_by_removal`
+  run just like a genuine differing value. 0.9.12's `bounded_by_removal`
   tried to avoid trusting a *too-recent* instance of this, but measured
   "too recent" against the entity's own current `live.last_changed` —
   which is itself whatever the last resolve wrote, so the guard only ever
@@ -87,11 +106,11 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   (`BULK_PER_ENTITY_LIMIT`) that could otherwise have reached a genuine
   value change further back.
 
-## [0.9.12] — 2026-09-08
+## [0.9.13] — 2026-09-08
 ### Fixed
-- **0.9.11's recorder-commit-lag protection could itself stall real
+- **0.9.12's recorder-commit-lag protection could itself stall real
   sensor history for hours on a busy install.** `_wait_for_recorder_commit()`
-  (added in 0.9.11) is called before every recorder history query this
+  (added in 0.9.12) is called before every recorder history query this
   integration issues — one per bulk batch, one per still-unresolved
   entity's deep/`last_triggered` query — in a plain sequential loop with no
   pacing of its own. `Recorder.async_get_commit_future()` is only free when
@@ -122,10 +141,10 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   window returns immediately without touching the recorder at all. This
   caps how often this integration can force an early commit, independent
   of how many queries a given pass issues, while still catching commit lag
-  on the same timescale as 0.9.11's original field evidence (a
+  on the same timescale as 0.9.12's original field evidence (a
   3-second-old transition).
 
-## [0.9.11] — 2026-09-03
+## [0.9.12] — 2026-09-03
 ### Fixed
 - **A recorder history query could miss a state change that had already
   happened — visible via `hass.states.get()` — but hadn't been committed
@@ -199,19 +218,6 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   always correct), but treats a too-recent removal boundary as
   inconclusive and falls through to the snapshot/deep/best-effort sources
   below instead.
-
-## [0.9.10] — 2026-09-03
-### Fixed
-- **Reconfigure no longer reloads the entry twice.** The reconfigure step
-  called `async_update_reload_and_abort()`, which schedules its own reload
-  on top of the config-entry update listener already registered in
-  `async_setup_entry` — the listener reloads on *any* data/options change,
-  so every reconfigure save reloaded the integration twice back-to-back
-  (and, per Home Assistant's own docs, could race). Switched to
-  `async_update_and_abort()`, which updates the entry and lets the existing
-  listener drive the single reload. Combining a config-entry listener with
-  a config-flow reloading method has been deprecated since HA Core 2026.6
-  and turns into a hard error from 2026.12 onward.
 
 ## [0.9.9] — 2026-08-30
 ### Fixed
@@ -513,6 +519,7 @@ All notable changes. Loosely based on [Keep a Changelog](https://keepachangelog.
   for the drain (not just after a failed attempt), closing a narrow race
   where a snapshot write during the debounce window could persist the reset
   artifact before the drain had a chance to correct it.
+
 
 ## [0.9.5] — 2026-08-17
 ### Fixed

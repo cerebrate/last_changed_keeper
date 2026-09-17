@@ -12,6 +12,11 @@
       "status": {
         "default": "mdi:history"
       }
+    },
+    "button": {
+      "restore_now": {
+        "default": "mdi:history"
+      }
     }
   }
 }
